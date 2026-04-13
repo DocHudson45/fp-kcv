@@ -269,9 +269,9 @@ This project demonstrates three things:
 
 ## Team
 
-- **Omotopuawa (Dzaky)** — Implementation, architecture, notebook, deployment
+- **Dzky** — Implementation, architecture, notebook, deployment
 - **Ata** — Paper writing, theory, Medium article
-- **Radit** — Literature review, defense preparation
+- **Radit** — Literature review, defense preparation, deployment
 
 ---
 
