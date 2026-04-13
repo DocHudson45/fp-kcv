@@ -279,12 +279,8 @@ This project demonstrates three things:
 
 ```
 ├── final_notebook.py          # Complete training + evaluation pipeline
-├── generate_dataset_v2.py     # Dataset generator (4320 rows, 18 users)
 ├── dataset_v2_full.csv        # The generated dataset
 ├── data.py                    # Pydantic schemas + LLM→DDQN conversion
 ├── main.py                    # Gemini LLM parser
-├── ddqn_model_final.pth       # Trained model weights (234 KB)
-├── deploy_config.json         # Deployment configuration
-├── final_results.csv          # Evaluation results table
 └── final_archetype_comparison.png  # Key results chart
 ```
