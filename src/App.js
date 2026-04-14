@@ -467,7 +467,10 @@ RULES:
         try {
            const errJson = JSON.parse(errText);
            if (errJson.error && errJson.error.message) errMsg = errJson.error.message;
-        } catch(e) {}
+           else if (errJson.error) errMsg = JSON.stringify(errJson.error);
+        } catch(e) {
+           errMsg = errText || `Error ${res.status}`;
+        }
         throw new Error(`${res.status}: ${errMsg}`);
       }
       const apiRes = await res.json();
@@ -647,11 +650,11 @@ RULES:
          }
 
          // 2. Tembak API
-         const res = await fetch("/api/parse", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
+         const res = await fetch(API_URL, {
+           method: "POST",
+           headers: { "Content-Type": "application/json" },
+           body: JSON.stringify(payload),
+         });
 
          if (!res.ok) throw new Error(`DDQN error: ${res.status}`);
          const d = await res.json();
