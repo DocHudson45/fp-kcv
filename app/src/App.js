@@ -31,42 +31,62 @@ const DailyTimeline = ({ schedule, fixedBlocks, energyProfile }) => {
   const maxEnergy = Math.max(...energyProfile, 1);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "36px 1fr 20px" }}>
-      {Array.from({ length: TOTAL_SLOTS }, (_, slot) => {
-        const time = slotToTime(slot);
-        const isHour = slot % 2 === 0;
-        const fixedHere = fixedBlocks.find((fb) => slot >= fb.startSlot && slot < fb.endSlot);
-        const scheduledHere = schedule.find((s) => slot >= s.scheduled_start && slot < s.scheduled_start + s.scheduled_slots);
-        const ep = energyProfile[slot];
-        const barH = Math.min(100, (ep / maxEnergy) * 100);
-        const isCurrent = slot === nowSlot;
-        
-        return (
-          <div key={slot} style={{ display: "contents" }}>
-            <div style={{ fontSize: 9, color: isCurrent ? "#34d399" : isHour ? "#52525b" : "#27272a", padding: "4px 0", textAlign: "right", paddingRight: 8 }}>{isHour ? time : ""}</div>
-            <div style={{ padding: "2px 0", minHeight: 28, background: isCurrent ? "rgba(52,211,153,0.03)" : "transparent" }}>
-              {fixedHere && slot === fixedHere.startSlot && (
-                 <div style={{ background: "rgba(99,102,241,0.1)", borderRadius: 6, padding: "6px", height: (fixedHere.endSlot - fixedHere.startSlot) * 28 - 4 }}>
-                   <span style={{ fontSize: 10, color: "#818cf8" }}>{fixedHere.title}</span>
-                 </div>
-              )}
-              {scheduledHere && slot === scheduledHere.scheduled_start && (() => {
-                const c = BLOCK_COLORS[scheduledHere.task_type] || BLOCK_COLORS["routine"];
-                return (
-                  <div style={{ background: c.bg, borderLeft: `3px solid ${c.border}`, padding: "6px", height: scheduledHere.scheduled_slots * 28 - 4, overflow: "hidden" }}>
-                    <span style={{ fontSize: 10, color: c.text, fontWeight: 700 }}>{scheduledHere.title}</span>
-                  </div>
-                )
-              })()}
-            </div>
-            <div style={{ padding: "4px 2px", display: "flex", alignItems: "center" }}>
-              <div style={{ width: "100%", height: 6, background: "#18181b", borderRadius: 3 }}>
-                <div style={{ width: `${barH}%`, height: "100%", borderRadius: 3, background: ep > 0.7 ? "#34d399" : ep > 0.4 ? "#f59e0b" : "#ef4444" }} />
+    <div style={{ position: "relative" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "36px 1fr 20px", position: "relative", zIndex: 1 }}>
+        {Array.from({ length: TOTAL_SLOTS }, (_, slot) => {
+          const time = slotToTime(slot);
+          const isHour = slot % 2 === 0;
+          const scheduledHere = schedule.find((s) => slot >= s.scheduled_start && slot < s.scheduled_start + s.scheduled_slots);
+          const ep = energyProfile[slot];
+          const barH = Math.min(100, (ep / maxEnergy) * 100);
+          const isCurrent = slot === nowSlot;
+          
+          return (
+            <div key={slot} style={{ display: "contents" }}>
+              <div style={{ fontSize: 9, color: isCurrent ? "#34d399" : isHour ? "#52525b" : "#27272a", padding: "4px 0", textAlign: "right", paddingRight: 8 }}>{isHour ? time : ""}</div>
+              <div style={{ padding: "2px 0", minHeight: 28, background: isCurrent ? "rgba(52,211,153,0.03)" : "transparent" }}>
+                {scheduledHere && slot === scheduledHere.scheduled_start && (() => {
+                  const c = BLOCK_COLORS[scheduledHere.task_type] || BLOCK_COLORS["routine"];
+                  return (
+                    <div style={{ background: c.bg, borderLeft: `3px solid ${c.border}`, padding: "6px", height: scheduledHere.scheduled_slots * 28 - 4, overflow: "hidden" }}>
+                      <span style={{ fontSize: 10, color: c.text, fontWeight: 700 }}>{scheduledHere.title}</span>
+                    </div>
+                  )
+                })()}
+              </div>
+              <div style={{ padding: "4px 2px", display: "flex", alignItems: "center" }}>
+                <div style={{ width: "100%", height: 6, background: "#18181b", borderRadius: 3 }}>
+                  <div style={{ width: `${barH}%`, height: "100%", borderRadius: 3, background: ep > 0.7 ? "#34d399" : ep > 0.4 ? "#f59e0b" : "#ef4444" }} />
+                </div>
               </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
+
+      {/* Render fixed blocks absolutely positioned */}
+      {fixedBlocks.map((fixedBlock) => (
+        <div
+          key={fixedBlock.id}
+          style={{
+            position: "absolute",
+            top: fixedBlock.startSlot * 28 + 2,
+            left: 36 + 2,
+            right: 20 + 2,
+            height: (fixedBlock.endSlot - fixedBlock.startSlot) * 28 - 4,
+            background: "rgba(99,102,241,0.15)",
+            border: "1px solid rgba(129,140,248,0.4)",
+            borderRadius: 6,
+            padding: "6px 8px",
+            zIndex: 2,
+            overflow: "hidden",
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          <span style={{ fontSize: 10, color: "#818cf8", fontWeight: 600 }}>{fixedBlock.title}</span>
+        </div>
+      ))}
     </div>
   );
 };
@@ -99,6 +119,21 @@ export default function App() {
   const [historyRecords, setHistoryRecords] = useState(() => db.getHistory());
   const [toastMsg, setToastMsg] = useState("");
   const [nlError, setNlError] = useState("");
+  const [debugPayload, setDebugPayload] = useState(null);
+  const [debugResponse, setDebugResponse] = useState(null);
+  const [showDebug, setShowDebug] = useState(false);
+  const [editingItemId, setEditingItemId] = useState(null);
+  const [editingItemType, setEditingItemType] = useState(null); // "task" or "fixed"
+  const [editForm, setEditForm] = useState({
+    title: "",
+    category: "analytical",
+    duration_estimate: 30,
+    priority: 3,
+    cognitive_demand: 3,
+    deadline: "",
+    startTime: "08:00",
+    endTime: "10:00",
+  });
 
   useEffect(() => {
     db.setActiveTasks(tasks);
@@ -264,6 +299,92 @@ export default function App() {
 
   const removeFixed = (id) => setFixedBlocks((prev) => prev.filter((f) => f.id !== id));
 
+  const startEditing = (itemId, itemType) => {
+    setEditingItemId(itemId);
+    setEditingItemType(itemType);
+    
+    if (itemType === "task") {
+      const task = tasks.find(t => t.id === itemId);
+      if (task) {
+        setEditForm({
+          title: task.title,
+          category: task.task_type,
+          duration_estimate: task.duration * 60,
+          priority: task.priority,
+          cognitive_demand: task.cognitive_demand,
+          deadline: task.deadline,
+          startTime: "08:00",
+          endTime: "10:00",
+        });
+      }
+    } else if (itemType === "fixed") {
+      const fixed = fixedBlocks.find(f => f.id === itemId);
+      if (fixed) {
+        const startHour = Math.floor(fixed.startSlot / 2);
+        const startMin = (fixed.startSlot % 2) * 30;
+        const endHour = Math.floor(fixed.endSlot / 2);
+        const endMin = (fixed.endSlot % 2) * 30;
+        setEditForm({
+          title: fixed.title,
+          category: "routine",
+          duration_estimate: 60,
+          priority: 3,
+          cognitive_demand: 3,
+          deadline: "",
+          startTime: `${String(startHour).padStart(2, "0")}:${String(startMin).padStart(2, "0")}`,
+          endTime: `${String(endHour).padStart(2, "0")}:${String(endMin).padStart(2, "0")}`,
+        });
+      }
+    }
+  };
+
+  const saveEdit = () => {
+    if (!editForm.title.trim()) return;
+    
+    if (editingItemType === "task") {
+      setTasks((prev) =>
+        prev.map((t) => {
+          if (t.id !== editingItemId) return t;
+          return {
+            ...t,
+            title: editForm.title.toUpperCase(),
+            task_type: editForm.category,
+            duration: editForm.duration_estimate / 60,
+            priority: editForm.priority,
+            cognitive_demand: editForm.cognitive_demand,
+            deadline: editForm.deadline,
+          };
+        })
+      );
+    } else if (editingItemType === "fixed") {
+      setFixedBlocks((prev) =>
+        prev.map((f) => {
+          if (f.id !== editingItemId) return f;
+          const sh = parseInt(editForm.startTime.split(":")[0]);
+          const sm = parseInt(editForm.startTime.split(":")[1] || "0");
+          const eh = parseInt(editForm.endTime.split(":")[0]);
+          const em = parseInt(editForm.endTime.split(":")[1] || "0");
+          const startSlot = Math.min(TOTAL_SLOTS - 1, sh * 2 + Math.floor(sm / 30));
+          const endSlot = Math.min(TOTAL_SLOTS, eh * 2 + Math.floor(em / 30));
+          return {
+            ...f,
+            title: editForm.title.toUpperCase(),
+            startSlot,
+            endSlot,
+          };
+        })
+      );
+    }
+    setEditingItemId(null);
+    setEditingItemType(null);
+    showToast("Changes saved!");
+  };
+
+  const cancelEdit = () => {
+    setEditingItemId(null);
+    setEditingItemType(null);
+  };
+
   const handleNlParse = async () => {
     if (!nlInput.trim()) return;
     const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
@@ -371,19 +492,43 @@ RULES:
         return hrs || 0.5;
       };
 
+      // Helper to parse ISO or time-only strings into Date objects for today
+      const parseDateTime = (str) => {
+        if (!str) return null;
+        try {
+          // If it's already a full ISO datetime, use it
+          if (str.includes("T")) {
+            return new Date(str);
+          }
+          // If it's just a time (HH:MM or HH:MM:SS), create a date for today with that time
+          if (/^\d{2}:\d{2}/.test(str)) {
+            const [hours, minutes] = str.split(":").map(Number);
+            const today = new Date();
+            today.setHours(hours || 0, minutes || 0, 0, 0);
+            return today;
+          }
+          // Otherwise try to parse as is
+          return new Date(str);
+        } catch (e) {
+          return null;
+        }
+      };
+
       for (const e of data.entries || []) {
         if (e.type === "fixed" && e.start && e.end) {
-          const sd = new Date(e.start);
-          const ed = new Date(e.end);
-          const startSlot = Math.min(TOTAL_SLOTS - 1, sd.getHours() * 2 + Math.floor(sd.getMinutes() / 30));
-          const endSlot = Math.min(TOTAL_SLOTS, ed.getHours() * 2 + Math.floor(ed.getMinutes() / 30));
-          if (endSlot > startSlot) {
-            newFixed.push({
-              id: crypto.randomUUID(),
-              title: e.title.toUpperCase(),
-              startSlot,
-              endSlot,
-            });
+          const sd = parseDateTime(e.start);
+          const ed = parseDateTime(e.end);
+          if (sd && ed && !isNaN(sd.getTime()) && !isNaN(ed.getTime())) {
+            const startSlot = Math.min(TOTAL_SLOTS - 1, sd.getHours() * 2 + Math.floor(sd.getMinutes() / 30));
+            const endSlot = Math.min(TOTAL_SLOTS, ed.getHours() * 2 + Math.floor(ed.getMinutes() / 30));
+            if (endSlot > startSlot) {
+              newFixed.push({
+                id: crypto.randomUUID(),
+                title: e.title.toUpperCase(),
+                startSlot,
+                endSlot,
+              });
+            }
           }
         } else {
           newTasks.push({
@@ -427,18 +572,27 @@ RULES:
   const doGenerate = async () => {
     const remainingTasks = activeTasks.filter(t => !t.is_fixed);
     setScheduleLoading(true);
+    setShowDebug(true);
     try {
-      // const nowHour = new Date().getHours() + new Date().getMinutes() / 60;
-      const nowHour = 5.0; // Hardcoded 5 AM for testing purposes
+      // Use actual current time
+      const nowHour = new Date().getHours() + new Date().getMinutes() / 60;
+      const endOfDayHour = 23.99;
+      
+      // Filter tasks from current time to end of day
+      const tasksToSchedule = remainingTasks.filter(t => {
+        const taskDeadline = deadlineToHour(t.deadline);
+        return taskDeadline >= nowHour;
+      });
       
       // Modal DDQN API requires building schedule incrementally.
       // For simplicity in the UI context while simulating loops:
       // We will call Modal endpoint for the *first* task, and then perhaps we can sequence them locally or
       // call in a loop here. I'll just rely on the fallback for full scheduling visualization if API is not fully set.
       
-      let localTasks = [...remainingTasks];
+      let localTasks = [...tasksToSchedule];
       let sched = [];
       let currTimeHour = nowHour;
+      let isFirstCall = true;
       
       let sanity = 10;
       while (localTasks.length > 0 && sanity > 0) {
@@ -463,6 +617,14 @@ RULES:
            user_history_records: historyRecords
          };
 
+         // Log payload on first call
+         if (isFirstCall) {
+           console.log("=== API PAYLOAD (First Call) ===");
+           console.log(JSON.stringify(payload, null, 2));
+           setDebugPayload(payload);
+           isFirstCall = false;
+         }
+
          // 2. Tembak API
          const res = await fetch(API_URL, {
            method: "POST",
@@ -472,6 +634,10 @@ RULES:
 
          if (!res.ok) throw new Error(`DDQN error: ${res.status}`);
          const d = await res.json();
+
+         console.log("=== API RESPONSE ===");
+         console.log(JSON.stringify(d, null, 2));
+         setDebugResponse(d);
 
          if (d.status !== "success" || !d.recommended_task_id) {
            break; // Berhenti jika AI error atau tidak ada rekomendasi
@@ -500,7 +666,6 @@ RULES:
       }
 
       setSchedule(sched);
-      setView("schedule");
       showToast("AI Schedule Generated!", "success");
 
     } catch (err) {
@@ -663,6 +828,82 @@ RULES:
                 )}
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 12, overflowY: "auto", paddingRight: 8 }}>
+                  {/* Edit Form */}
+                  {editingItemId && (
+                    <div style={{ ...S.card, flexDirection: "column", alignItems: "stretch", gap: 12, background: "rgba(107,114,128,0.1)", borderColor: "rgba(107,114,128,0.3)" }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af" }}>EDITING {editingItemType === "task" ? "TASK" : "FIXED EVENT"}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <button onClick={() => { setEditForm((f) => ({ ...f })); if (editingItemType === "fixed") {/* keep showing time fields */} else {/* keep showing other fields */} }} style={{ ...S.btn, background: "rgba(255,255,255,0.04)", color: "#e4e4e7" }}>Editing</button>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: editingItemType === "fixed" ? "2fr 1fr 1fr" : "2fr 1fr", gap: 8 }}>
+                        <input placeholder={editingItemType === "fixed" ? "Block name" : "Task title"} value={editForm.title} onChange={(e) => setEditForm({ ...editForm, title: e.target.value })} style={S.input} />
+                        {editingItemType === "fixed" ? (
+                          <>
+                            <div><label style={{fontSize:9}}>START</label><input type="time" value={editForm.startTime} onChange={(e) => setEditForm({ ...editForm, startTime: e.target.value })} style={S.input} /></div>
+                            <div><label style={{fontSize:9}}>END</label><input type="time" value={editForm.endTime} onChange={(e) => setEditForm({ ...editForm, endTime: e.target.value })} style={S.input} /></div>
+                          </>
+                        ) : (
+                          <select value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value })} style={S.select}>
+                            <option value="analytical">Analytical</option>
+                            <option value="routine">Routine</option>
+                            <option value="creative">Creative</option>
+                          </select>
+                        )}
+                      </div>
+                      {editingItemType === "task" && (
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+                          <div><label style={{fontSize:9}}>DURATION (min)</label><input type="number" value={editForm.duration_estimate} onChange={e => setEditForm({...editForm, duration_estimate: +e.target.value})} style={S.input}/></div>
+                          <div><label style={{fontSize:9}}>PRIORITY</label><select value={editForm.priority} onChange={e => setEditForm({...editForm, priority: +e.target.value})} style={S.select}>{[1,2,3,4,5].map(i => <option key={i} value={i}>{i}</option>)}</select></div>
+                          <div><label style={{fontSize:9}}>COGNITIVE DEMAND</label><select value={editForm.cognitive_demand} onChange={e => setEditForm({...editForm, cognitive_demand: +e.target.value})} style={S.select}>{[1,2,3,4,5].map(i => <option key={i} value={i}>{i}</option>)}</select></div>
+                          <div><label style={{fontSize:9}}>DEADLINE</label><input type="time" value={editForm.deadline} onChange={e => setEditForm({...editForm, deadline: e.target.value})} style={S.input} /></div>
+                        </div>
+                      )}
+                      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                        <button onClick={cancelEdit} style={{ ...S.btn, color: "#ef4444" }}>Cancel</button>
+                        <button onClick={saveEdit} style={S.btnP}>Save Changes</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Fixed Events Section */}
+                  {fixedBlocks.length > 0 && (
+                    <>
+                      <div style={{ fontSize: 11, color: "#a1a1aa", letterSpacing: 1 }}>FIXED EVENTS</div>
+                      {fixedBlocks.map((fixedBlock) => {
+                        const startHour = Math.floor(fixedBlock.startSlot / 2);
+                        const startMin = (fixedBlock.startSlot % 2) * 30;
+                        const endHour = Math.floor(fixedBlock.endSlot / 2);
+                        const endMin = (fixedBlock.endSlot % 2) * 30;
+                        const startTime = `${String(startHour).padStart(2, "0")}:${String(startMin).padStart(2, "0")}`;
+                        const endTime = `${String(endHour).padStart(2, "0")}:${String(endMin).padStart(2, "0")}`;
+                        const duration = ((fixedBlock.endSlot - fixedBlock.startSlot) * 30) / 60;
+                        
+                        return (
+                          <div key={fixedBlock.id} style={{ ...S.card, borderColor: "rgba(129,140,248,0.3)", borderLeft: "3px solid rgba(129,140,248,0.6)" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1 }}>
+                              <div style={{ width: 8, height: 8, borderRadius: "50%", background: "rgba(129,140,248,0.6)", flexShrink: 0 }} />
+                              <div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                  <span style={{ fontWeight: 700, color: "#818cf8" }}>{fixedBlock.title}</span>
+                                  <span style={S.badge({ text: "#818cf8", bg: "rgba(129,140,248,0.1)", border: "#818cf8" })}>FIXED</span>
+                                </div>
+                                <div style={{ display: "flex", gap: 12, marginTop: 4, fontSize: 10, color: "#52525b" }}>
+                                  <span>⏰ {startTime} - {endTime}</span>
+                                  <span>{duration.toFixed(1)}h</span>
+                                </div>
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", gap: 10 }}>
+                              <button onClick={() => startEditing(fixedBlock.id, "fixed")} style={{ ...S.btn, color: "#f59e0b" }}>EDIT</button>
+                              <button onClick={() => removeFixed(fixedBlock.id)} style={{ ...S.btn, color: "#ef4444" }}>✕</button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
+
+                  {/* Flexible Tasks Section */}
                   <div style={{ fontSize: 11, color: "#a1a1aa", letterSpacing: 1 }}>FLEXIBLE TASKS</div>
               {activeTasks.map((task) => {
                 const elapsed = getElapsed(task);
@@ -689,6 +930,7 @@ RULES:
                         {fmt(elapsed)}
                       </span>
                       <button onClick={() => toggleTask(task.id)} style={{ ...S.btn, color: task.is_running ? "#34d399" : "#a1a1aa" }}>{task.is_running ? "STOP" : "START"}</button>
+                      <button onClick={() => startEditing(task.id, "task")} style={{ ...S.btn, color: "#f59e0b" }}>EDIT</button>
                       <button onClick={() => archiveTask(task.id)} style={{ ...S.btn, color: "#22c55e" }}>DONE</button>
                       <button onClick={() => abandonTask(task.id)} style={{ ...S.btn, color: "#f59e0b" }}>ABANDON</button>
                       <button onClick={() => discardTask(task.id)} style={{ ...S.btn, color: "#ef4444" }}>✕</button>
@@ -708,8 +950,123 @@ RULES:
           )}
 
           {view === "schedule" && (
-             <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100%", color: "#a1a1aa" }}>
-               <h1>Weekly Multi-Day Calendar (WIP) ...</h1>
+             <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 12 }}>
+               {/* Week view: Days and time slots */}
+               <div style={{ flex: 1, display: "flex", gap: 1, overflowX: "auto", overflowY: "auto", background: "rgba(255,255,255,0.01)", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", padding: 12 }}>
+                 {/* Create 7 columns for each day */}
+                 {Array.from({ length: 7 }, (_, dayIdx) => {
+                   const dayDate = new Date();
+                   dayDate.setDate(dayDate.getDate() + dayIdx);
+                   const dayName = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dayDate.getDay()];
+                   const dateStr = `${dayDate.getMonth() + 1}/${dayDate.getDate()}`;
+                   
+                   return (
+                     <div key={dayIdx} style={{ flex: "0 0 180px", display: "flex", flexDirection: "column", borderRight: dayIdx < 6 ? "1px solid rgba(255,255,255,0.06)" : "none", minHeight: 0 }}>
+                       {/* Day header */}
+                       <div style={{ padding: "10px", borderBottom: "1px solid rgba(255,255,255,0.06)", background: "rgba(52,211,153,0.05)", textAlign: "center" }}>
+                         <div style={{ fontSize: 12, fontWeight: 700, color: "#34d399" }}>{dayName}</div>
+                         <div style={{ fontSize: 10, color: "#71717a" }}>{dateStr}</div>
+                       </div>
+                       
+                       {/* Time slots grid */}
+                       <div style={{ flex: 1, overflowY: "auto", position: "relative", borderLeft: "1px solid rgba(255,255,255,0.06)" }}>
+                         {Array.from({ length: 48 }, (_, slot) => {
+                           const hour = Math.floor(slot / 2);
+                           const isHour = slot % 2 === 0;
+                           const timeStr = String(hour).padStart(2, "0") + ":00";
+                           
+                           // Find schedules for this slot on this day
+                           const scheduledHere = schedule.find((s) => slot >= s.scheduled_start && slot < s.scheduled_start + s.scheduled_slots);
+                           const fixedHere = fixedBlocks.find((fb) => slot >= fb.startSlot && slot < fb.endSlot);
+                           
+                           return (
+                             <div
+                               key={slot}
+                               style={{
+                                 padding: "4px",
+                                 minHeight: 28,
+                                 borderBottom: isHour ? "1px solid rgba(255,255,255,0.06)" : "1px solid rgba(255,255,255,0.02)",
+                                 background: isHour ? "transparent" : "rgba(255,255,255,0.005)",
+                                 position: "relative",
+                                 fontSize: 8,
+                                 color: "#52525b",
+                               }}
+                             >
+                               {isHour && <span style={{ lineHeight: "12px" }}>{timeStr}</span>}
+                               
+                               {/* Show fixed event if starts at this slot */}
+                               {fixedHere && slot === fixedHere.startSlot && (
+                                 <div
+                                   style={{
+                                     background: "rgba(99,102,241,0.2)",
+                                     borderRadius: 4,
+                                     padding: "4px",
+                                     marginTop: 2,
+                                     fontSize: 9,
+                                     color: "#818cf8",
+                                     fontWeight: 600,
+                                     height: (fixedHere.endSlot - fixedHere.startSlot) * 28 - 4,
+                                     display: "flex",
+                                     alignItems: "center",
+                                     overflow: "hidden",
+                                   }}
+                                 >
+                                   {fixedHere.title}
+                                 </div>
+                               )}
+                               
+                               {/* Show scheduled task if starts at this slot */}
+                               {scheduledHere && slot === scheduledHere.scheduled_start && (() => {
+                                 const c = BLOCK_COLORS[scheduledHere.task_type] || BLOCK_COLORS["routine"];
+                                 return (
+                                   <div
+                                     style={{
+                                       background: c.bg,
+                                       borderLeft: `3px solid ${c.border}`,
+                                       borderRadius: 4,
+                                       padding: "4px",
+                                       marginTop: 2,
+                                       fontSize: 9,
+                                       color: c.text,
+                                       fontWeight: 600,
+                                       height: scheduledHere.scheduled_slots * 28 - 4,
+                                       display: "flex",
+                                       alignItems: "center",
+                                       overflow: "hidden",
+                                     }}
+                                   >
+                                     {scheduledHere.title}
+                                   </div>
+                                 );
+                               })()}
+                             </div>
+                           );
+                         })}
+                       </div>
+                     </div>
+                   );
+                 })}
+               </div>
+               
+               {/* Legend */}
+               <div style={{ display: "flex", gap: 16, fontSize: 11, color: "#71717a" }}>
+                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                   <div style={{ width: 16, height: 16, background: "rgba(99,102,241,0.2)", borderRadius: 2 }} />
+                   <span>Fixed Events</span>
+                 </div>
+                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                   <div style={{ width: 16, height: 16, background: BLOCK_COLORS.analytical.bg, borderRadius: 2 }} />
+                   <span>Analytical</span>
+                 </div>
+                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                   <div style={{ width: 16, height: 16, background: BLOCK_COLORS.routine.bg, borderRadius: 2 }} />
+                   <span>Routine</span>
+                 </div>
+                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                   <div style={{ width: 16, height: 16, background: BLOCK_COLORS.creative.bg, borderRadius: 2 }} />
+                   <span>Creative</span>
+                 </div>
+               </div>
              </div>
           )}
 
@@ -721,6 +1078,34 @@ RULES:
                    <span>{t.task_type} · {t.duration.toFixed(1)}h</span>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Debug Panel */}
+          {showDebug && (debugPayload || debugResponse) && (
+            <div style={{ marginTop: 24, padding: 16, background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#34d399" }}>🐛 DEBUG: API Calls</div>
+                <button onClick={() => setShowDebug(false)} style={{ ...S.btn, color: "#ef4444" }}>Close Debug</button>
+              </div>
+              
+              {debugPayload && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#818cf8", marginBottom: 8 }}>REQUEST PAYLOAD:</div>
+                  <pre style={{ background: "rgba(0,0,0,0.5)", padding: 8, borderRadius: 4, overflow: "auto", maxHeight: 200, fontSize: 9, color: "#a1a1aa", fontFamily: "monospace" }}>
+                    {JSON.stringify(debugPayload, null, 2)}
+                  </pre>
+                </div>
+              )}
+              
+              {debugResponse && (
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#34d399", marginBottom: 8 }}>API RESPONSE:</div>
+                  <pre style={{ background: "rgba(0,0,0,0.5)", padding: 8, borderRadius: 4, overflow: "auto", maxHeight: 200, fontSize: 9, color: "#a1a1aa", fontFamily: "monospace" }}>
+                    {JSON.stringify(debugResponse, null, 2)}
+                  </pre>
+                </div>
+              )}
             </div>
           )}
         </div>

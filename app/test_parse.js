@@ -1,6 +1,6 @@
 require('dotenv').config({ path: '.env.local' });
 const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
-const nlInput = "Aku ada kelas jam 12-13 hari ini, ada presentasi jadi aku harus belajar dulu. Terus ada tugas resum PAA pak rully jam 23.59. Rada sulit sih. Trus ada lagi dl jam 23.59 tentang K-means ML.";
+const nlInput = "Ada kelas PAA jam 1 PM - 3 PM";
 
 const payload = {
   systemInstruction: {
@@ -23,7 +23,10 @@ fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:
   const jsonStr = data.candidates?.[0]?.content?.parts?.[0]?.text || "Failed";
   let parsed = jsonStr;
   try { parsed = JSON.stringify(JSON.parse(jsonStr), null, 2); } catch(e){}
-  const out = `input:\n${nlInput}\n\nJson (parsed):\n${parsed}`;
+  const out = `input:\n${nlInput}\n\nRaw API Response:\n${JSON.stringify(data, null, 2)}\n\nJson (parsed):\n${parsed}`;
   require('fs').writeFileSync('debug_output.txt', out);
   console.log("Done. Check debug_output.txt");
+}).catch(err => {
+  console.error("Error:", err);
+  require('fs').writeFileSync('debug_output.txt', `Error: ${err.message}`);
 });

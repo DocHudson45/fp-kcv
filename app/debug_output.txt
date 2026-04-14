@@ -1,5 +1,50 @@
 input:
-Aku ada kelas jam 12-13 hari ini, ada presentasi jadi aku harus belajar dulu. Terus ada tugas resum PAA pak rully jam 23.59. Rada sulit sih. Trus ada lagi dl jam 23.59 tentang K-means ML.
+Ada kelas PAA jam 1 PM - 3 PM
+
+Raw API Response:
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "{\n  \"tasks\": [\n    {\n      \"name\": \"Kelas PAA\",\n      \"type\": \"fixed\",\n      \"category\": \"routine\",\n      \"priority\": 3,\n      \"cognitive_demand\": 3,\n      \"duration\": \"2h\",\n      \"start_time\": \"2024-07-29T13:00:00\",\n      \"end_time\": \"2024-07-29T15:00:00\"\n    }\n  ]\n}"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 230,
+    "candidatesTokenCount": 127,
+    "totalTokenCount": 629,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 230
+      }
+    ],
+    "thoughtsTokenCount": 272
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "IFHeabmQHeu8juMPzcjP-QY"
+}
 
 Json (parsed):
-Failed
+{
+  "tasks": [
+    {
+      "name": "Kelas PAA",
+      "type": "fixed",
+      "category": "routine",
+      "priority": 3,
+      "cognitive_demand": 3,
+      "duration": "2h",
+      "start_time": "2024-07-29T13:00:00",
+      "end_time": "2024-07-29T15:00:00"
+    }
+  ]
+}
