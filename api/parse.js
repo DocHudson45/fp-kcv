@@ -1,31 +1,48 @@
-export default async function handler(req, res) {
+export const config = {
+  runtime: 'edge',
+};
+
+export default async function handler(req) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return new Response(JSON.stringify({ error: "Method not allowed" }), {
+      status: 405,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY; // server-side only, not exposed
+  // Check both naming conventions for the API key in Edge Runtime
+  const apiKey = process.env.GEMINI_API_KEY || process.env.REACT_APP_GEMINI_API_KEY;
+
   if (!apiKey) {
-    return res.status(500).json({ error: "GEMINI_API_KEY not configured" });
+    return new Response(
+      JSON.stringify({ 
+        error: "GEMINI_API_KEY not configured", 
+        tip: "Add GEMINI_API_KEY or REACT_APP_GEMINI_API_KEY to your Vercel project settings." 
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
   }
 
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body),
-      }
-    );
+    const body = await req.json();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
-    if (!response.ok) {
-      const errText = await response.text();
-      return res.status(response.status).json({ error: errText });
-    }
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     const data = await response.json();
-    return res.status(200).json(data);
+
+    return new Response(JSON.stringify(data), {
+      status: response.status,
+      headers: { "Content-Type": "application/json" },
+    });
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    return new Response(JSON.stringify({ error: "Proxy Error", message: e.message }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 }
