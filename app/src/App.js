@@ -385,13 +385,8 @@ export default function App() {
     setEditingItemType(null);
   };
 
-  const handleNlParse = async () => {
+ const handleNlParse = async () => {
     if (!nlInput.trim()) return;
-    const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
-    if (!apiKey) {
-      setNlError("REACT_APP_GEMINI_API_KEY is missing in .env.local");
-      return;
-    }
 
     setNlLoading(true);
     setNlError("");
@@ -455,14 +450,16 @@ RULES:
         },
       };
 
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        }
-      );
+      const isDev = process.env.NODE_ENV !== "production";
+      const parseUrl = isDev
+        ? `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.REACT_APP_GEMINI_API_KEY}`
+        : "/api/parse";
+
+      const res = await fetch(parseUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
       if (!res.ok) {
         const errText = await res.text();
@@ -514,17 +511,23 @@ RULES:
         }
       };
 
-      for (const e of data.entries || []) {
-        if (e.type === "fixed" && e.start && e.end) {
-          const sd = parseDateTime(e.start);
-          const ed = parseDateTime(e.end);
+      const entries = data.entries || data.tasks || [];
+      
+      for (const e of entries) {
+        const title = (e.title || e.name || "Untitled").toUpperCase();
+        const startStr = e.start || e.start_time;
+        const endStr = e.end || e.end_time;
+
+        if (e.type === "fixed" && startStr && endStr) {
+          const sd = parseDateTime(startStr);
+          const ed = parseDateTime(endStr);
           if (sd && ed && !isNaN(sd.getTime()) && !isNaN(ed.getTime())) {
             const startSlot = Math.min(TOTAL_SLOTS - 1, sd.getHours() * 2 + Math.floor(sd.getMinutes() / 30));
             const endSlot = Math.min(TOTAL_SLOTS, ed.getHours() * 2 + Math.floor(ed.getMinutes() / 30));
             if (endSlot > startSlot) {
               newFixed.push({
                 id: crypto.randomUUID(),
-                title: e.title.toUpperCase(),
+                title: title,
                 startSlot,
                 endSlot,
               });
@@ -533,7 +536,7 @@ RULES:
         } else {
           newTasks.push({
             id: crypto.randomUUID(),
-            title: e.title.toUpperCase(),
+            title: title,
             task_type: e.category,
             duration: parseDurHr(e.duration),
             priority: e.priority,
@@ -569,27 +572,25 @@ RULES:
     setNlLoading(false);
   };
 
-  const doGenerate = async () => {
+  const doGenerate = async (isRegen = false) => {
     const remainingTasks = activeTasks.filter(t => !t.is_fixed);
     setScheduleLoading(true);
     setShowDebug(true);
+    setDebugResponse([]); // Start fresh array of responses
+    
     try {
-      // Use actual current time
-      const nowHour = new Date().getHours() + new Date().getMinutes() / 60;
-      const endOfDayHour = 23.99;
+      let currentVibeForApi = vibe;
+      if (isRegen === true) {
+        currentVibeForApi = Math.max(0.1, vibe - 0.1);
+        setVibe(currentVibeForApi);
+      }
+
+      // Hardcoded to 5 AM for testing as requested
+      const nowHour = 5; 
+      // const now = new Date();
+      // const nowHour = now.getHours() + now.getMinutes() / 60;
       
-      // Filter tasks from current time to end of day
-      const tasksToSchedule = remainingTasks.filter(t => {
-        const taskDeadline = deadlineToHour(t.deadline);
-        return taskDeadline >= nowHour;
-      });
-      
-      // Modal DDQN API requires building schedule incrementally.
-      // For simplicity in the UI context while simulating loops:
-      // We will call Modal endpoint for the *first* task, and then perhaps we can sequence them locally or
-      // call in a loop here. I'll just rely on the fallback for full scheduling visualization if API is not fully set.
-      
-      let localTasks = [...tasksToSchedule];
+      let localTasks = [...remainingTasks];
       let sched = [];
       let currTimeHour = nowHour;
       let isFirstCall = true;
@@ -598,23 +599,43 @@ RULES:
       while (localTasks.length > 0 && sanity > 0) {
          sanity--;
          
-         // 1. Siapkan Payload untuk API Modal
+         const nowDate = new Date();
+         const apiHour = Math.floor(currTimeHour);
+         const apiMin = Math.round((currTimeHour % 1) * 60);
+         const isoTime = `${nowDate.getFullYear()}-${String(nowDate.getMonth()+1).padStart(2,'0')}-${String(nowDate.getDate()).padStart(2,'0')}T${String(apiHour).padStart(2,'0')}:${String(apiMin).padStart(2,'0')}:00`;
+
+         // Convert tasks to FrontendTask format (what deploy_api.py expects)
+         const durationToStr = (hrs) => {
+           const h = Math.floor(hrs);
+           const m = Math.round((hrs - h) * 60);
+           if (h > 0 && m > 0) return `${h}h${m}m`;
+           if (h > 0) return `${h}h`;
+           return `${m}m`;
+         };
+
+         // Build deadline as ISO string
+         const deadlineToIso = (dlStr) => {
+           if (!dlStr) return null;
+           // dlStr is "HH:MM" format from our task objects
+           const today = new Date();
+           return `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}T${dlStr}:00`;
+         };
+
          const payload = {
-           user_id: "radit_001",
-           current_hour: currTimeHour, // expected by Modal DDQN
-           current_day: 0,
+           user_id: "user_001",
+           current_time_iso: isoTime,
            chronotype: characterType,
-           current_vibe: vibe,
-           tasks_today: localTasks.map((t) => ({
+           current_vibe: currentVibeForApi,
+           entries: localTasks.map((t) => ({
              id: t.id,
-             duration: parseFloat(t.duration) || 0.5, // float hours
-             deadline: deadlineToHour(t.deadline), // float hour
-             importance: priorityToImportance(t.priority), // float 0-1
-             cognitive_demand: t.cognitive_demand / 5.0, // float 0-1
-             task_type: t.task_type || "routine",
-             partial_done: t.partial_done || 0.0
+             type: "flexible",
+             title: t.title,
+             category: t.task_type || "routine",
+             duration: durationToStr(parseFloat(t.duration) || 0.5),
+             priority: t.priority || 3,
+             cognitive_demand: t.cognitive_demand || 3,
+             deadline: deadlineToIso(t.deadline),
            })),
-           user_history_records: historyRecords
          };
 
          // Log payload on first call
@@ -626,25 +647,30 @@ RULES:
          }
 
          // 2. Tembak API
-         const res = await fetch(API_URL, {
-           method: "POST",
-           headers: { "Content-Type": "application/json" },
-           body: JSON.stringify(payload),
-         });
+         const res = await fetch("/api/parse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
 
          if (!res.ok) throw new Error(`DDQN error: ${res.status}`);
          const d = await res.json();
 
-         console.log("=== API RESPONSE ===");
-         console.log(JSON.stringify(d, null, 2));
-         setDebugResponse(d);
+         setDebugResponse(prev => [...prev, d]); // Append to debug array
 
-         if (d.status !== "success" || !d.recommended_task_id) {
-           break; // Berhenti jika AI error atau tidak ada rekomendasi
+         if (d.status !== "success") break;
+
+         // Match by id first, then by title as fallback
+         let recTask = null;
+         if (d.recommended_task_id) {
+           recTask = localTasks.find((t) => t.id === d.recommended_task_id);
          }
-
-         // 3. Cari tugas yang direkomendasikan AI
-         const recTask = localTasks.find((t) => t.id === d.recommended_task_id);
+         if (!recTask && d.recommended_task_title) {
+           recTask = localTasks.find((t) => t.title === d.recommended_task_title);
+         }
+         if (!recTask && d.recommended_task_index !== undefined) {
+           recTask = localTasks[d.recommended_task_index];
+         }
          if (!recTask) break;
 
          // 4. Masukkan ke dalam slot kalender UI
@@ -769,12 +795,18 @@ RULES:
             {view === "dashboard" && (
               <>
                 <button style={S.btn} onClick={() => { setShowAddTask(!showAddTask); setForm((f) => ({ ...f, is_fixed: false })); }}>+ Task</button>
-                <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={doGenerate} disabled={scheduleLoading}>
+                <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={() => doGenerate(false)} disabled={scheduleLoading}>
                   {scheduleLoading ? "⏳ Scheduling..." : "◈ AI Schedule"}
+                </button>
+                <button 
+                  style={{...S.btn, borderColor: '#ef4444', color: '#ef4444', background: 'rgba(239, 68, 68, 0.05)'}} 
+                  onClick={() => { if(window.confirm("Reset all data?")) { localStorage.clear(); window.location.reload(); }}}
+                >
+                  ⚠ Reset Session
                 </button>
               </>
             )}
-            {view === "schedule" && <button style={S.btnP} onClick={doGenerate}>↻ Regenerate</button>}
+            {view === "schedule" && <button style={S.btnP} onClick={() => doGenerate(true)}>↻ Regenerate</button>}
           </div>
         </div>
 
@@ -1098,12 +1130,19 @@ RULES:
                 </div>
               )}
               
-              {debugResponse && (
+              {debugResponse && debugResponse.length > 0 && (
                 <div>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: "#34d399", marginBottom: 8 }}>API RESPONSE:</div>
-                  <pre style={{ background: "rgba(0,0,0,0.5)", padding: 8, borderRadius: 4, overflow: "auto", maxHeight: 200, fontSize: 9, color: "#a1a1aa", fontFamily: "monospace" }}>
-                    {JSON.stringify(debugResponse, null, 2)}
-                  </pre>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#34d399", marginBottom: 8 }}>API RESPONSE HISTORY:</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    {debugResponse.map((res, idx) => (
+                      <div key={idx} style={{ padding: 8, background: "rgba(0,0,0,0.4)", borderRadius: 4, borderLeft: "2px solid #10b981" }}>
+                        <div style={{ fontSize: 9, color: "#10b981", marginBottom: 4, fontWeight: 700 }}>STEP {idx + 1}</div>
+                        <pre style={{ fontSize: 10, color: "#d1d1d6", margin: 0, overflowX: "auto" }}>
+                          {JSON.stringify(res, null, 2)}
+                        </pre>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
