@@ -320,6 +320,7 @@ RULES:
       if (!textResponse) throw new Error("Empty response");
 
       const data = JSON.parse(textResponse);
+      console.log("Parsed JSON from Gemini API:", JSON.stringify(data, null, 2));
       const newFixed = [];
       const newTasks = [];
 
