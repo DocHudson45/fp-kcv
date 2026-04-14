@@ -29,64 +29,132 @@ const DailyTimeline = ({ schedule, fixedBlocks, energyProfile }) => {
   const now = new Date();
   const nowSlot = now.getHours() * 2 + Math.floor(now.getMinutes() / 30);
   const maxEnergy = Math.max(...energyProfile, 1);
+  const SLOT_HEIGHT = 40; // Fixed height per 30-min slot in pixels
 
   return (
     <div style={{ position: "relative" }}>
-      <div style={{ display: "grid", gridTemplateColumns: "36px 1fr 20px", position: "relative", zIndex: 1 }}>
-        {Array.from({ length: TOTAL_SLOTS }, (_, slot) => {
-          const time = slotToTime(slot);
-          const isHour = slot % 2 === 0;
-          const scheduledHere = schedule.find((s) => slot >= s.scheduled_start && slot < s.scheduled_start + s.scheduled_slots);
-          const ep = energyProfile[slot];
-          const barH = Math.min(100, (ep / maxEnergy) * 100);
-          const isCurrent = slot === nowSlot;
-          
-          return (
-            <div key={slot} style={{ display: "contents" }}>
-              <div style={{ fontSize: 9, color: isCurrent ? "#34d399" : isHour ? "#52525b" : "#27272a", padding: "4px 0", textAlign: "right", paddingRight: 8 }}>{isHour ? time : ""}</div>
-              <div style={{ padding: "2px 0", minHeight: 28, background: isCurrent ? "rgba(52,211,153,0.03)" : "transparent" }}>
-                {scheduledHere && slot === scheduledHere.scheduled_start && (() => {
-                  const c = BLOCK_COLORS[scheduledHere.task_type] || BLOCK_COLORS["routine"];
-                  return (
-                    <div style={{ background: c.bg, borderLeft: `3px solid ${c.border}`, padding: "6px", height: scheduledHere.scheduled_slots * 28 - 4, overflow: "hidden" }}>
-                      <span style={{ fontSize: 10, color: c.text, fontWeight: 700 }}>{scheduledHere.title}</span>
-                    </div>
-                  )
-                })()}
-              </div>
-              <div style={{ padding: "4px 2px", display: "flex", alignItems: "center" }}>
-                <div style={{ width: "100%", height: 6, background: "#18181b", borderRadius: 3 }}>
-                  <div style={{ width: `${barH}%`, height: "100%", borderRadius: 3, background: ep > 0.7 ? "#34d399" : ep > 0.4 ? "#f59e0b" : "#ef4444" }} />
-                </div>
-              </div>
+      {/* Time labels on the left */}
+      <div style={{ display: "flex", gap: 12 }}>
+        <div style={{ width: 50 }}>
+          {Array.from({ length: 24 }, (_, h) => (
+            <div
+              key={h}
+              style={{
+                height: SLOT_HEIGHT * 2,
+                fontSize: 10,
+                fontWeight: 600,
+                color: "#52525b",
+                display: "flex",
+                alignItems: "flex-start",
+                paddingTop: 4,
+                paddingRight: 8,
+                textAlign: "right",
+              }}
+            >
+              {String(h).padStart(2, "0")}:00
             </div>
-          );
-        })}
-      </div>
-
-      {/* Render fixed blocks absolutely positioned */}
-      {fixedBlocks.map((fixedBlock) => (
-        <div
-          key={fixedBlock.id}
-          style={{
-            position: "absolute",
-            top: fixedBlock.startSlot * 28 + 2,
-            left: 36 + 2,
-            right: 20 + 2,
-            height: (fixedBlock.endSlot - fixedBlock.startSlot) * 28 - 4,
-            background: "rgba(99,102,241,0.15)",
-            border: "1px solid rgba(129,140,248,0.4)",
-            borderRadius: 6,
-            padding: "6px 8px",
-            zIndex: 2,
-            overflow: "hidden",
-            display: "flex",
-            alignItems: "center",
-          }}
-        >
-          <span style={{ fontSize: 10, color: "#818cf8", fontWeight: 600 }}>{fixedBlock.title}</span>
+          ))}
         </div>
-      ))}
+
+        {/* Main calendar grid */}
+        <div style={{ flex: 1, position: "relative", borderLeft: "1px solid rgba(255,255,255,0.1)" }}>
+          {/* Draw all slots with fixed height */}
+          <div style={{ position: "relative" }}>
+            {Array.from({ length: TOTAL_SLOTS }, (_, slot) => {
+              const isHour = slot % 2 === 0;
+              const isCurrent = slot === nowSlot;
+              const ep = energyProfile[slot];
+              const barH = Math.min(100, (ep / maxEnergy) * 100);
+
+              return (
+                <div
+                  key={slot}
+                  style={{
+                    position: "absolute",
+                    top: slot * SLOT_HEIGHT,
+                    left: 0,
+                    right: 0,
+                    height: SLOT_HEIGHT,
+                    borderBottom: isHour ? "1px solid rgba(255,255,255,0.06)" : "1px solid rgba(255,255,255,0.02)",
+                    background: isCurrent ? "rgba(52,211,153,0.02)" : "transparent",
+                    padding: "2px 8px",
+                    boxSizing: "border-box",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    overflow: "hidden",
+                  }}
+                >
+                  {/* Energy bar */}
+                  <div style={{ width: 16, height: "100%", background: "#18181b", borderRadius: 2, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <div
+                      style={{
+                        width: "80%",
+                        height: `${barH}%`,
+                        borderRadius: 1,
+                        background: ep > 0.7 ? "#34d399" : ep > 0.4 ? "#f59e0b" : "#ef4444",
+                        transition: "height 0.2s",
+                      }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Scheduled tasks */}
+            {schedule.map((task) => (
+              <div
+                key={task.id}
+                style={{
+                  position: "absolute",
+                  top: task.scheduled_start * SLOT_HEIGHT,
+                  left: 30,
+                  right: 8,
+                  height: task.scheduled_slots * SLOT_HEIGHT - 2,
+                  background: BLOCK_COLORS[task.task_type]?.bg || BLOCK_COLORS.routine.bg,
+                  borderLeft: `3px solid ${BLOCK_COLORS[task.task_type]?.border || BLOCK_COLORS.routine.border}`,
+                  borderRadius: 4,
+                  padding: "6px 8px",
+                  overflow: "hidden",
+                  zIndex: 3,
+                  display: "flex",
+                  alignItems: "center",
+                }}
+              >
+                <span style={{ fontSize: 10, color: BLOCK_COLORS[task.task_type]?.text || BLOCK_COLORS.routine.text, fontWeight: 600 }}>
+                  {task.title}
+                </span>
+              </div>
+            ))}
+
+            {/* Fixed events */}
+            {fixedBlocks.map((fixedBlock) => (
+              <div
+                key={fixedBlock.id}
+                style={{
+                  position: "absolute",
+                  top: fixedBlock.startSlot * SLOT_HEIGHT,
+                  left: 30,
+                  right: 8,
+                  height: (fixedBlock.endSlot - fixedBlock.startSlot) * SLOT_HEIGHT - 2,
+                  background: "rgba(99,102,241,0.15)",
+                  border: "1px solid rgba(129,140,248,0.4)",
+                  borderRadius: 4,
+                  padding: "6px 8px",
+                  zIndex: 2,
+                  overflow: "hidden",
+                  display: "flex",
+                  alignItems: "center",
+                }}
+              >
+                <span style={{ fontSize: 10, color: "#818cf8", fontWeight: 600 }}>
+                  {fixedBlock.title}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
@@ -385,8 +453,13 @@ export default function App() {
     setEditingItemType(null);
   };
 
- const handleNlParse = async () => {
+  const handleNlParse = async () => {
     if (!nlInput.trim()) return;
+    const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
+    if (!apiKey) {
+      setNlError("REACT_APP_GEMINI_API_KEY is missing in .env.local");
+      return;
+    }
 
     setNlLoading(true);
     setNlError("");
@@ -396,19 +469,43 @@ export default function App() {
           parts: [
             {
               text: `Current timestamp (ISO): ${new Date().toISOString()}
+Today's date: ${new Date().toISOString().split('T')[0]}
 
-You are a task parser for an AI scheduling system. Extract tasks and events from the user's input.
+You are a task parser for an AI scheduling system. Extract tasks and events from the user's input in Indonesian or English.
 
-RULES:
+CRITICAL RULES FOR CLASSIFICATION:
+- "fixed" type: Events/classes/meetings with EXPLICIT START AND END TIMES (MUST have both!)
+  Examples: "kelas pbo jam 1-2", "meeting 3pm-4pm", "zoom call 10:00-11:00"
+  → ALWAYS generate start and end ISO datetime like: "2026-04-15T13:00:00"
+  
+- "flexible" type: Tasks WITHOUT fixed times (just deadline or priority, need to be scheduled)
+  Examples: "finish ML homework due 5pm", "beli groceries", "review notes"
+  → Only include deadline, NOT start/end times
+
+DATETIME FORMAT EXAMPLES:
+- Input "jam 1-2 siang" → start="2026-04-15T13:00:00", end="2026-04-15T14:00:00"
+- Input "jam 10-11 pagi" → start="2026-04-15T10:00:00", end="2026-04-15T11:00:00"
+- Input "3pm-4pm" → start="2026-04-15T15:00:00", end="2026-04-15T16:00:00"
+
+PARSING INSTRUCTIONS:
 1. Extract every task, event, and deadline mentioned.
-2. Categorize each into EXACTLY ONE of these categories: "analytical", "routine", "creative".
-3. Mark events with specific times as "fixed" (type="fixed", include start/end as ISO datetime).
-4. Mark tasks that can be scheduled flexibly as "flexible" (type="flexible").
-5. Set priority 1-5 (5=most urgent/important).
-6. Set cognitive_demand 1-5 based on mental focus needed.
-7. Duration: estimate if not specified. Use formats like "30m", "1h".
-8. Deadline: use ISO format.
-9. If the user expresses tiredness, stress, or excitement: Add to energy_forecast with scale: -2=exhausted, -1=tired, 0=normal, 1=good, 2=energized`,
+2. Categorize task type into EXACTLY ONE: "analytical", "routine", "creative" (guess based on description).
+3. **CRITICAL**: If user mentions time range (jam X-Y, AXpm-Ypm, X:00-Y:00) → MUST set type="fixed" WITH start/end datetimes in ISO format.
+4. If no time range, set type="flexible" with only deadline (if mentioned).
+5. Priority: 1-5 (5=most urgent). Classes/meetings default to 4.
+6. Cognitive demand: 1-5 based on mental focus. Default 3.
+7. Duration: For flexible tasks, estimate if not specified. For fixed events, calculate from end-start.
+8. If the user expresses tiredness, stress, or excitement: Add to energy_forecast with scale: -2=exhausted, -1=tired, 0=normal, 1=good, 2=energized
+
+STRICT OUTPUT EXAMPLES (FOLLOW THIS!):
+Input: "ada kelas pbo jam 1-2"
+→ type="fixed", title="KELAS PBO", start="2026-04-15T13:00:00", end="2026-04-15T14:00:00", duration="1h", category="routine", priority=4
+
+Input: "tugas ml deadline jam 5"
+→ type="flexible", title="TUGAS ML", deadline="17:00", category="analytical", priority=3
+
+Input: "meeting 10-11 pagi"
+→ type="fixed", title="MEETING", start="2026-04-15T10:00:00", end="2026-04-15T11:00:00", category="routine", priority=4`,
             },
           ],
         },
@@ -450,16 +547,14 @@ RULES:
         },
       };
 
-      const isDev = process.env.NODE_ENV !== "production";
-      const parseUrl = isDev
-        ? `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.REACT_APP_GEMINI_API_KEY}`
-        : "/api/parse";
-
-      const res = await fetch(parseUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
 
       if (!res.ok) {
         const errText = await res.text();
@@ -467,10 +562,7 @@ RULES:
         try {
            const errJson = JSON.parse(errText);
            if (errJson.error && errJson.error.message) errMsg = errJson.error.message;
-           else if (errJson.error) errMsg = JSON.stringify(errJson.error);
-        } catch(e) {
-           errMsg = errText || `Error ${res.status}`;
-        }
+        } catch(e) {}
         throw new Error(`${res.status}: ${errMsg}`);
       }
       const apiRes = await res.json();
@@ -478,7 +570,9 @@ RULES:
       if (!textResponse) throw new Error("Empty response");
 
       const data = JSON.parse(textResponse);
-      console.log("Parsed JSON from Gemini API:", JSON.stringify(data, null, 2));
+      console.log("=== GEMINI PARSED DATA ===");
+      console.log(JSON.stringify(data, null, 2));
+      
       const newFixed = [];
       const newTasks = [];
 
@@ -507,6 +601,13 @@ RULES:
             today.setHours(hours || 0, minutes || 0, 0, 0);
             return today;
           }
+          // Handle single hour format (e.g., "1", "14")
+          if (/^\d{1,2}$/.test(str.trim())) {
+            const hour = parseInt(str.trim());
+            const today = new Date();
+            today.setHours(hour, 0, 0, 0);
+            return today;
+          }
           // Otherwise try to parse as is
           return new Date(str);
         } catch (e) {
@@ -514,23 +615,47 @@ RULES:
         }
       };
 
-      const entries = data.entries || data.tasks || [];
-      
-      for (const e of entries) {
-        const title = (e.title || e.name || "Untitled").toUpperCase();
-        const startStr = e.start || e.start_time;
-        const endStr = e.end || e.end_time;
-
-        if (e.type === "fixed" && startStr && endStr) {
-          const sd = parseDateTime(startStr);
-          const ed = parseDateTime(endStr);
+      for (const e of data.entries || []) {
+        console.log(`Processing entry: type="${e.type}", title="${e.title}", start="${e.start}", end="${e.end}", duration="${e.duration}"`);
+        
+        // Extract start/end from duration if not explicitly provided (fallback for Gemini quirks)
+        let start = e.start;
+        let end = e.end;
+        
+        if (e.type === "fixed" && !start && !end) {
+          // Try to extract time range from title like "jam 9.30 - 12.00", "jam 9:30-12:00", etc
+          // Improved regex to capture hours AND minutes (with . , : or space separator)
+          const titleMatch = e.title?.match(/jam\s+(\d{1,2})[.,:\s]*(\d{0,2})\s*-\s*(\d{1,2})[.,:\s]*(\d{0,2})/i);
+          if (titleMatch) {
+            const startHour = parseInt(titleMatch[1]);
+            const startMin = titleMatch[2] ? parseInt(titleMatch[2]) : 0;
+            const endHour = parseInt(titleMatch[3]);
+            const endMin = titleMatch[4] ? parseInt(titleMatch[4]) : 0;
+            
+            const startDate = new Date();
+            startDate.setHours(startHour, startMin, 0, 0);
+            start = startDate.toISOString();
+            
+            const endDate = new Date();
+            endDate.setHours(endHour, endMin, 0, 0);
+            end = endDate.toISOString();
+            console.log(`Fallback extracted from title: "${e.title}" → start=${startHour}:${String(startMin).padStart(2,'0')}, end=${endHour}:${String(endMin).padStart(2,'0')}`);
+          }
+        }
+        
+        if (e.type === "fixed" && start && end) {
+          const sd = parseDateTime(start);
+          const ed = parseDateTime(end);
           if (sd && ed && !isNaN(sd.getTime()) && !isNaN(ed.getTime())) {
             const startSlot = Math.min(TOTAL_SLOTS - 1, sd.getHours() * 2 + Math.floor(sd.getMinutes() / 30));
             const endSlot = Math.min(TOTAL_SLOTS, ed.getHours() * 2 + Math.floor(ed.getMinutes() / 30));
             if (endSlot > startSlot) {
+              console.log(`Fixed block: "${e.title}"`);
+              console.log(`  Parsed time: ${sd.getHours()}:${String(sd.getMinutes()).padStart(2,'0')} - ${ed.getHours()}:${String(ed.getMinutes()).padStart(2,'0')}`);
+              console.log(`  Slot: ${startSlot} - ${endSlot}`);
               newFixed.push({
                 id: crypto.randomUUID(),
-                title: title,
+                title: e.title.toUpperCase(),
                 startSlot,
                 endSlot,
               });
@@ -539,7 +664,7 @@ RULES:
         } else {
           newTasks.push({
             id: crypto.randomUUID(),
-            title: title,
+            title: e.title.toUpperCase(),
             task_type: e.category,
             duration: parseDurHr(e.duration),
             priority: e.priority,
@@ -575,25 +700,68 @@ RULES:
     setNlLoading(false);
   };
 
-  const doGenerate = async (isRegen = false) => {
-    const remainingTasks = activeTasks.filter(t => !t.is_fixed);
+  const doGenerate = async () => {
+    // Only schedule flexible tasks. Fixed blocks are handled separately in fixedBlocks array.
+    // Ensure no fixed events are included in API calls.
     setScheduleLoading(true);
     setShowDebug(true);
-    setDebugResponse([]); // Start fresh array of responses
-    
     try {
-      let currentVibeForApi = vibe;
-      if (isRegen === true) {
-        currentVibeForApi = Math.max(0.1, vibe - 0.1);
-        setVibe(currentVibeForApi);
-      }
-
-      // Hardcoded to 5 AM for testing as requested
-      const nowHour = 5; 
-      // const now = new Date();
-      // const nowHour = now.getHours() + now.getMinutes() / 60;
+      // Use actual current time
+      const nowHour = new Date().getHours() + new Date().getMinutes() / 60;
+      const endOfDayHour = 23.99;
       
-      let localTasks = [...remainingTasks];
+      // Helper: Check if a time slot overlaps with any fixed block OR scheduled task
+      const isSlotOccupied = (startSlot, slotsNeeded, existingSched) => {
+        const taskStart = startSlot;
+        const taskEnd = startSlot + slotsNeeded;
+        
+        // Check fixed blocks
+        const fixedOverlap = fixedBlocks.some(fb => {
+          return !(taskEnd <= fb.startSlot || taskStart >= fb.endSlot);
+        });
+        
+        // Check already scheduled tasks in current session
+        const schedOverlap = existingSched.some(s => {
+          const sStart = s.scheduled_start;
+          const sEnd = s.scheduled_start + s.scheduled_slots;
+          return !(taskEnd <= sStart || taskStart >= sEnd);
+        });
+        
+        console.log(`Checking slot ${startSlot}-${taskEnd}: fixed=${fixedOverlap}, sched=${schedOverlap}`);
+        return fixedOverlap || schedOverlap;
+      };
+      
+      // Helper: Find next available slot that doesn't conflict with fixed blocks or existing schedule
+      const findNextAvailableSlot = (fromHour, duration, existingSched) => {
+        const slotsNeeded = Math.max(1, Math.round(duration * 2));
+        const endOfDay = 46; // 23:00
+        
+        // Scan every 0.5-hour slot
+        for (let slot = Math.round(fromHour * 2); slot + slotsNeeded <= endOfDay; slot++) {
+          if (!isSlotOccupied(slot, slotsNeeded, existingSched)) {
+            console.log(`Found available slot at ${slot} (hour ${slot / 2}) for ${duration}h task`);
+            return { slot, hour: slot / 2 };
+          }
+        }
+        
+        console.log(`No available slot found for ${duration}h task starting from hour ${fromHour}`);
+        return null;
+      };
+      
+      // Filter flexible tasks from current time to end of day
+      const tasksToSchedule = activeTasks.filter(t => {
+        const taskDeadline = deadlineToHour(t.deadline);
+        return taskDeadline >= nowHour;
+      });
+      
+      // Modal DDQN API requires building schedule incrementally.
+      // For simplicity in the UI context while simulating loops:
+      // We will call Modal endpoint for the *first* task, and then perhaps we can sequence them locally or
+      // call in a loop here. I'll just rely on the fallback for full scheduling visualization if API is not fully set.
+      
+      // SAFEGUARD: Ensure no fixed blocks are included in scheduling
+      const verifyNoFixedEvents = (tasksArray) => tasksArray.filter(t => t.is_fixed !== true);
+      let localTasks = verifyNoFixedEvents(tasksToSchedule);
       let sched = [];
       let currTimeHour = nowHour;
       let isFirstCall = true;
@@ -602,43 +770,23 @@ RULES:
       while (localTasks.length > 0 && sanity > 0) {
          sanity--;
          
-         const nowDate = new Date();
-         const apiHour = Math.floor(currTimeHour);
-         const apiMin = Math.round((currTimeHour % 1) * 60);
-         const isoTime = `${nowDate.getFullYear()}-${String(nowDate.getMonth()+1).padStart(2,'0')}-${String(nowDate.getDate()).padStart(2,'0')}T${String(apiHour).padStart(2,'0')}:${String(apiMin).padStart(2,'0')}:00`;
-
-         // Convert tasks to FrontendTask format (what deploy_api.py expects)
-         const durationToStr = (hrs) => {
-           const h = Math.floor(hrs);
-           const m = Math.round((hrs - h) * 60);
-           if (h > 0 && m > 0) return `${h}h${m}m`;
-           if (h > 0) return `${h}h`;
-           return `${m}m`;
-         };
-
-         // Build deadline as ISO string
-         const deadlineToIso = (dlStr) => {
-           if (!dlStr) return null;
-           // dlStr is "HH:MM" format from our task objects
-           const today = new Date();
-           return `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}T${dlStr}:00`;
-         };
-
+         // 1. Siapkan Payload untuk API Modal
          const payload = {
-           user_id: "user_001",
-           current_time_iso: isoTime,
+           user_id: "radit_001",
+           current_hour: currTimeHour, // expected by Modal DDQN
+           current_day: 0,
            chronotype: characterType,
-           current_vibe: currentVibeForApi,
-           entries: localTasks.map((t) => ({
+           current_vibe: vibe,
+           tasks_today: localTasks.map((t) => ({
              id: t.id,
-             type: "flexible",
-             title: t.title,
-             category: t.task_type || "routine",
-             duration: durationToStr(parseFloat(t.duration) || 0.5),
-             priority: t.priority || 3,
-             cognitive_demand: t.cognitive_demand || 3,
-             deadline: deadlineToIso(t.deadline),
+             duration: parseFloat(t.duration) || 0.5, // float hours
+             deadline: deadlineToHour(t.deadline), // float hour
+             importance: priorityToImportance(t.priority), // float 0-1
+             cognitive_demand: t.cognitive_demand / 5.0, // float 0-1
+             task_type: t.task_type || "routine",
+             partial_done: t.partial_done || 0.0
            })),
+           user_history_records: historyRecords
          };
 
          // Log payload on first call
@@ -659,36 +807,38 @@ RULES:
          if (!res.ok) throw new Error(`DDQN error: ${res.status}`);
          const d = await res.json();
 
-         setDebugResponse(prev => [...prev, d]); // Append to debug array
+         console.log("=== API RESPONSE ===");
+         console.log(JSON.stringify(d, null, 2));
+         setDebugResponse(d);
 
-         if (d.status !== "success") break;
+         if (d.status !== "success" || !d.recommended_task_id) {
+           break; // Berhenti jika AI error atau tidak ada rekomendasi
+         }
 
-         // Match by id first, then by title as fallback
-         let recTask = null;
-         if (d.recommended_task_id) {
-           recTask = localTasks.find((t) => t.id === d.recommended_task_id);
-         }
-         if (!recTask && d.recommended_task_title) {
-           recTask = localTasks.find((t) => t.title === d.recommended_task_title);
-         }
-         if (!recTask && d.recommended_task_index !== undefined) {
-           recTask = localTasks[d.recommended_task_index];
-         }
+         // 3. Cari tugas yang direkomendasikan AI
+         const recTask = localTasks.find((t) => t.id === d.recommended_task_id);
          if (!recTask) break;
 
-         // 4. Masukkan ke dalam slot kalender UI
-         const startSlot = Math.round(currTimeHour * 2);
+         // 4. Find available slot that doesn't overlap with fixed blocks or existing schedule
          const slotsNeeded = Math.max(1, Math.round(recTask.duration * 2));
+         const availableSlot = findNextAvailableSlot(currTimeHour, recTask.duration, sched);
+         
+         if (!availableSlot) {
+           console.log(`No available slot for task "${recTask.title}" (need ${recTask.duration}h)`);
+           break; // Tidak ada slot yang tersedia hari ini
+         }
 
+         console.log(`Scheduling "${recTask.title}" at slot ${availableSlot.slot} (hour ${availableSlot.hour})`);
+         
          sched.push({
            ...recTask,
-           scheduled_start: startSlot,
+           scheduled_start: availableSlot.slot,
            scheduled_slots: slotsNeeded,
            assigned_block: "AI",
          });
 
-         // 5. Majukan waktu simulasi untuk tugas selanjutnya
-         currTimeHour += recTask.duration;
+         // 5. Majukan waktu simulasi untuk tugas selanjutnya (setelah task yang dijadwalkan)
+         currTimeHour = availableSlot.hour + recTask.duration;
 
          // Hapus tugas yang sudah dijadwalkan dari antrean
          localTasks = localTasks.filter((t) => t.id !== d.recommended_task_id);
@@ -798,18 +948,12 @@ RULES:
             {view === "dashboard" && (
               <>
                 <button style={S.btn} onClick={() => { setShowAddTask(!showAddTask); setForm((f) => ({ ...f, is_fixed: false })); }}>+ Task</button>
-                <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={() => doGenerate(false)} disabled={scheduleLoading}>
+                <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={doGenerate} disabled={scheduleLoading}>
                   {scheduleLoading ? "⏳ Scheduling..." : "◈ AI Schedule"}
-                </button>
-                <button 
-                  style={{...S.btn, borderColor: '#ef4444', color: '#ef4444', background: 'rgba(239, 68, 68, 0.05)'}} 
-                  onClick={() => { if(window.confirm("Reset all data?")) { localStorage.clear(); window.location.reload(); }}}
-                >
-                  ⚠ Reset Session
                 </button>
               </>
             )}
-            {view === "schedule" && <button style={S.btnP} onClick={() => doGenerate(true)}>↻ Regenerate</button>}
+            {view === "schedule" && <button style={S.btnP} onClick={doGenerate}>↻ Regenerate</button>}
           </div>
         </div>
 
@@ -1133,19 +1277,12 @@ RULES:
                 </div>
               )}
               
-              {debugResponse && debugResponse.length > 0 && (
+              {debugResponse && (
                 <div>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: "#34d399", marginBottom: 8 }}>API RESPONSE HISTORY:</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {debugResponse.map((res, idx) => (
-                      <div key={idx} style={{ padding: 8, background: "rgba(0,0,0,0.4)", borderRadius: 4, borderLeft: "2px solid #10b981" }}>
-                        <div style={{ fontSize: 9, color: "#10b981", marginBottom: 4, fontWeight: 700 }}>STEP {idx + 1}</div>
-                        <pre style={{ fontSize: 10, color: "#d1d1d6", margin: 0, overflowX: "auto" }}>
-                          {JSON.stringify(res, null, 2)}
-                        </pre>
-                      </div>
-                    ))}
-                  </div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#34d399", marginBottom: 8 }}>API RESPONSE:</div>
+                  <pre style={{ background: "rgba(0,0,0,0.5)", padding: 8, borderRadius: 4, overflow: "auto", maxHeight: 200, fontSize: 9, color: "#a1a1aa", fontFamily: "monospace" }}>
+                    {JSON.stringify(debugResponse, null, 2)}
+                  </pre>
                 </div>
               )}
             </div>
