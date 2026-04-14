@@ -1,0 +1,5 @@
+input:
+Aku ada kelas jam 12-13 hari ini, ada presentasi jadi aku harus belajar dulu. Terus ada tugas resum PAA pak rully jam 23.59. Rada sulit sih. Trus ada lagi dl jam 23.59 tentang K-means ML.
+
+Json (parsed):
+Failed

@@ -271,6 +271,10 @@ The `compute_profile()` function calculates:
 2. Tasks with deadline_day > current_day + 1 remain in the buffer
 3. The buffer_accept_rate in the user profile captures whether the user typically accepts or defers buffer tasks
 4. Unfinished tasks at the end of a day are moved to the buffer if their deadline is in the future
+5. For each buffer task pulled into today's pool, the system presents it to the user with a yes/no prompt: "Do you want to work on [task title] today?"
+6. If the user accepts, the task enters the scheduling queue
+7. If the user declines, the task remains in the buffer for the next day
+8. The user's response is recorded and contributes to the buffer_accept_rate in their profile
 
 **Outputs:**
 
@@ -298,6 +302,28 @@ The `compute_profile()` function calculates:
 
 - Task returned to pool with updated partial_done value
 - Updated current_hour and vibe
+
+  3.9 Schedule Approval and Regeneration
+  Description: After the Decision Engine generates a recommended schedule, the user can review it before committing. If the user disagrees with the proposed order, they can reject it and request a new schedule with adjusted parameters.
+  Inputs:
+
+Generated schedule (task order with time slots)
+User's approval or rejection
+Optional: user feedback on what they disliked (e.g., "too many hard tasks in the morning")
+
+Processing:
+
+System displays the complete proposed schedule in the timeline view
+User reviews and selects "Accept" or "Regenerate"
+If accepted, the schedule becomes active and task execution tracking begins
+If rejected, the system regenerates with a slightly adjusted vibe parameter (vibe -= 0.1 per rejection, simulating increasing user fatigue/dissatisfaction) to produce a different ordering
+Maximum 3 regeneration attempts before the system offers the heuristic fallback
+
+Outputs:
+
+Approved schedule (active)
+Or regenerated alternative schedule
+Or heuristic fallback schedule
 
 ---
 
@@ -416,6 +442,13 @@ The system exposes a REST API (FastAPI or Modal.com serverless):
 | FR-17 | The system shall return value estimates for all available tasks alongside the recommendation (for transparency)                               | Low      |
 | FR-18 | The system shall support task input in Bahasa Indonesia and English                                                                           | Low      |
 | FR-19 | The system shall extract mood/energy cues from natural language input and convert them to a vibe value                                        | Low      |
+
+| ID    | Requirement                                                                                                | Priority |
+| ----- | ---------------------------------------------------------------------------------------------------------- | -------- |
+| FR-20 | System shall present the generated schedule for user review before activating it                           | High     |
+| FR-21 | System shall allow the user to reject a schedule and regenerate with adjusted parameters, up to 3 attempts | Medium   |
+| FR-22 | System shall prompt the user to accept or decline each buffer task before including it in today's schedule | Medium   |
+| FR-23 | System shall record buffer acceptance/rejection decisions for profile computation                          | Medium   |
 
 ---
 

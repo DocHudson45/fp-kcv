@@ -4,42 +4,81 @@ import {
   CHRONOTYPES,
   TOTAL_SLOTS,
   ENERGY_LABELS,
-  DEMAND_COLORS,
   BLOCK_COLORS,
   buildEnergyProfile,
-  generateScheduleFallback,
-  saveData,
-  loadData,
   fmt,
   slotToTime,
   deadlineToHour,
   priorityToImportance,
   cogDemandStrToFloat,
 } from "./utils";
+import { db } from "./db";
 
 const PriorityDots = ({ level }) => (
   <span style={{ display: "inline-flex", gap: 2 }}>
     {[1, 2, 3, 4, 5].map((i) => (
       <span
         key={i}
-        style={{
-          width: 5,
-          height: 5,
-          borderRadius: "50%",
-          background: i <= level ? "#f59e0b" : "#27272a",
-        }}
+        style={{ width: 5, height: 5, borderRadius: "50%", background: i <= level ? "#f59e0b" : "#27272a" }}
       />
     ))}
   </span>
 );
 
+const DailyTimeline = ({ schedule, fixedBlocks, energyProfile }) => {
+  const now = new Date();
+  const nowSlot = now.getHours() * 2 + Math.floor(now.getMinutes() / 30);
+  const maxEnergy = Math.max(...energyProfile, 1);
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "36px 1fr 20px" }}>
+      {Array.from({ length: TOTAL_SLOTS }, (_, slot) => {
+        const time = slotToTime(slot);
+        const isHour = slot % 2 === 0;
+        const fixedHere = fixedBlocks.find((fb) => slot >= fb.startSlot && slot < fb.endSlot);
+        const scheduledHere = schedule.find((s) => slot >= s.scheduled_start && slot < s.scheduled_start + s.scheduled_slots);
+        const ep = energyProfile[slot];
+        const barH = Math.min(100, (ep / maxEnergy) * 100);
+        const isCurrent = slot === nowSlot;
+        
+        return (
+          <div key={slot} style={{ display: "contents" }}>
+            <div style={{ fontSize: 9, color: isCurrent ? "#34d399" : isHour ? "#52525b" : "#27272a", padding: "4px 0", textAlign: "right", paddingRight: 8 }}>{isHour ? time : ""}</div>
+            <div style={{ padding: "2px 0", minHeight: 28, background: isCurrent ? "rgba(52,211,153,0.03)" : "transparent" }}>
+              {fixedHere && slot === fixedHere.startSlot && (
+                 <div style={{ background: "rgba(99,102,241,0.1)", borderRadius: 6, padding: "6px", height: (fixedHere.endSlot - fixedHere.startSlot) * 28 - 4 }}>
+                   <span style={{ fontSize: 10, color: "#818cf8" }}>{fixedHere.title}</span>
+                 </div>
+              )}
+              {scheduledHere && slot === scheduledHere.scheduled_start && (() => {
+                const c = BLOCK_COLORS[scheduledHere.task_type] || BLOCK_COLORS["routine"];
+                return (
+                  <div style={{ background: c.bg, borderLeft: `3px solid ${c.border}`, padding: "6px", height: scheduledHere.scheduled_slots * 28 - 4, overflow: "hidden" }}>
+                    <span style={{ fontSize: 10, color: c.text, fontWeight: 700 }}>{scheduledHere.title}</span>
+                  </div>
+                )
+              })()}
+            </div>
+            <div style={{ padding: "4px 2px", display: "flex", alignItems: "center" }}>
+              <div style={{ width: "100%", height: 6, background: "#18181b", borderRadius: 3 }}>
+                <div style={{ width: `${barH}%`, height: "100%", borderRadius: 3, background: ep > 0.7 ? "#34d399" : ep > 0.4 ? "#f59e0b" : "#ef4444" }} />
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 export default function App() {
-  const [tasks, setTasks] = useState([]);
+  const [userState, setUserState] = useState(() => db.getUser());
+  const [tasks, setTasks] = useState(() => db.getActiveTasks());
   const [view, setView] = useState("dashboard");
   const [vibe, setVibe] = useState(0.5); // 0.0 - 1.0 (defaults to 0.5)
-  const [schedule, setSchedule] = useState([]);
-  const [managerBlocks, setManagerBlocks] = useState([]);
-  const [fixedBlocks, setFixedBlocks] = useState([]);
+  const [schedule, setSchedule] = useState(() => db.getScheduleForDay(db.getUser().current_day));
+  const [fixedBlocks, setFixedBlocks] = useState(() => db.getFixedEvents());
+  const [bufferPool, setBufferPool] = useState(() => db.getBufferPool());
   const [showAddTask, setShowAddTask] = useState(false);
   const [, setTick] = useState(0);
   const [form, setForm] = useState({
@@ -53,39 +92,29 @@ export default function App() {
     startTime: "08:00",
     endTime: "10:00",
   });
-  const [characterType, setCharacterType] = useState("morning");
+  const [characterType, setCharacterType] = useState(() => db.getUser().chronotype);
   const [nlInput, setNlInput] = useState("");
   const [nlLoading, setNlLoading] = useState(false);
   const [scheduleLoading, setScheduleLoading] = useState(false);
-  const [useAI, setUseAI] = useState(true);
-  const [historyRecords, setHistoryRecords] = useState([]);
+  const [historyRecords, setHistoryRecords] = useState(() => db.getHistory());
   const [toastMsg, setToastMsg] = useState("");
   const [nlError, setNlError] = useState("");
 
   useEffect(() => {
-    const d = loadData();
-    if (d) {
-      if (d.tasks) setTasks(d.tasks);
-      if (d.vibe !== undefined) setVibe(d.vibe);
-      if (d.fixedBlocks?.length) setFixedBlocks(d.fixedBlocks);
-      if (d.schedule) setSchedule(d.schedule);
-      if (d.managerBlocks) setManagerBlocks(d.managerBlocks);
-      if (d.characterType) setCharacterType(d.characterType);
-      if (d.historyRecords) setHistoryRecords(d.historyRecords);
-    }
-  }, []);
+    db.setActiveTasks(tasks);
+    db.setFixedEvents(fixedBlocks);
+    db.setScheduleForDay(userState.current_day, schedule);
+  }, [tasks, fixedBlocks, schedule, userState.current_day]);
 
   useEffect(() => {
-    saveData({
-      tasks,
-      vibe,
-      fixedBlocks,
-      schedule,
-      managerBlocks,
-      characterType,
-      historyRecords,
-    });
-  }, [tasks, vibe, fixedBlocks, schedule, managerBlocks, characterType, historyRecords]);
+    db.updateUser({ chronotype: characterType });
+  }, [characterType]);
+
+  useEffect(() => {
+    db.data.historyRecords = historyRecords;
+    db.setBufferPool(bufferPool);
+    db.save();
+  }, [historyRecords, bufferPool]);
 
   useEffect(() => {
     const iv = setInterval(() => setTick((t) => t + 1), 1000);
@@ -314,7 +343,15 @@ RULES:
         }
       );
 
-      if (!res.ok) throw new Error("Parse failed");
+      if (!res.ok) {
+        const errText = await res.text();
+        let errMsg = "Parse failed";
+        try {
+           const errJson = JSON.parse(errText);
+           if (errJson.error && errJson.error.message) errMsg = errJson.error.message;
+        } catch(e) {}
+        throw new Error(`${res.status}: ${errMsg}`);
+      }
       const apiRes = await res.json();
       const textResponse = apiRes.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!textResponse) throw new Error("Empty response");
@@ -356,7 +393,7 @@ RULES:
             duration: parseDurHr(e.duration),
             priority: e.priority,
             cognitive_demand: e.cognitive_demand,
-            deadline: e.deadline || "",
+            deadline: e.deadline ? (e.deadline.includes("T") ? e.deadline.split("T")[1].substring(0,5) : String(e.deadline).substring(0,5)) : "23:59",
             is_running: false,
             total_duration: 0,
             last_started_at: null,
@@ -389,83 +426,88 @@ RULES:
 
   const doGenerate = async () => {
     const remainingTasks = activeTasks.filter(t => !t.is_fixed);
-    if (useAI) {
-      setScheduleLoading(true);
-      try {
-        const nowHour = new Date().getHours() + new Date().getMinutes() / 60;
-        
-        // Modal DDQN API requires building schedule incrementally.
-        // For simplicity in the UI context while simulating loops:
-        // We will call Modal endpoint for the *first* task, and then perhaps we can sequence them locally or
-        // call in a loop here. I'll just rely on the fallback for full scheduling visualization if API is not fully set.
-        
-        let localTasks = [...remainingTasks];
-        let sched = [];
-        let currTime = nowHour;
-        
-        let sanity = 10;
-        while (localTasks.length > 0 && sanity > 0) {
-           sanity--;
-           const req = {
-             user_id: "user_test",
-             current_hour: currTime,
-             current_day: 0,
-             current_vibe: vibe,
-             chronotype: characterType,
-             tasks_today: localTasks.map(t => ({
-               id: t.id,
-               title: t.title,
-               duration: t.duration,
-               deadline: deadlineToHour(t.deadline),
-               importance: priorityToImportance(t.priority),
-               cognitive_demand: t.cognitive_demand / 5.0,
-               task_type: t.task_type,
-               partial_done: t.partial_done || 0.0
-             })),
-             user_history_records: historyRecords
-           };
-           
-           const res = await fetch(API_URL, {
-             method: "POST",
-             headers: { "Content-Type": "application/json" },
-             body: JSON.stringify(req)
-           });
-           
-           if (!res.ok) throw new Error("DDQN error");
-           const d = await res.json();
-           
-           // Find task
-           const recTask = localTasks.find(t => t.id === d.recommended_task_id);
-           if (!recTask) break;
-           
-           // Slot in
-           const startSlot = Math.round(currTime * 2);
-           const slotsNeeded = Math.max(1, Math.round(recTask.duration * 2));
-           
-           sched.push({ ...recTask, scheduled_start: startSlot, scheduled_slots: slotsNeeded, assigned_block: "AI" });
-           
-           currTime += recTask.duration;
-           localTasks = localTasks.filter(t => t.id !== d.recommended_task_id);
-        }
+    setScheduleLoading(true);
+    try {
+      // const nowHour = new Date().getHours() + new Date().getMinutes() / 60;
+      const nowHour = 5.0; // Hardcoded 5 AM for testing purposes
+      
+      // Modal DDQN API requires building schedule incrementally.
+      // For simplicity in the UI context while simulating loops:
+      // We will call Modal endpoint for the *first* task, and then perhaps we can sequence them locally or
+      // call in a loop here. I'll just rely on the fallback for full scheduling visualization if API is not fully set.
+      
+      let localTasks = [...remainingTasks];
+      let sched = [];
+      let currTimeHour = nowHour;
+      
+      let sanity = 10;
+      while (localTasks.length > 0 && sanity > 0) {
+         sanity--;
+         
+         // 1. Siapkan Payload untuk API Modal
+         const payload = {
+           user_id: "radit_001",
+           current_hour: currTimeHour, // expected by Modal DDQN
+           current_day: 0,
+           chronotype: characterType,
+           current_vibe: vibe,
+           tasks_today: localTasks.map((t) => ({
+             id: t.id,
+             duration: parseFloat(t.duration) || 0.5, // float hours
+             deadline: deadlineToHour(t.deadline), // float hour
+             importance: priorityToImportance(t.priority), // float 0-1
+             cognitive_demand: t.cognitive_demand / 5.0, // float 0-1
+             task_type: t.task_type || "routine",
+             partial_done: t.partial_done || 0.0
+           })),
+           user_history_records: historyRecords
+         };
 
-        setSchedule(sched);
-        setManagerBlocks([]);
-        setView("schedule");
-        showToast("AI Schedule Generated!");
-      } catch (err) {
-        showToast("AI DDQN unavailable, falling back to local heuristic");
-        const r = generateScheduleFallback(remainingTasks, fixedBlocks, vibe, characterType);
-        setSchedule(r.scheduled);
-        setManagerBlocks(r.managerBlocks);
-        setView("schedule");
+         // 2. Tembak API
+         const res = await fetch(API_URL, {
+           method: "POST",
+           headers: { "Content-Type": "application/json" },
+           body: JSON.stringify(payload),
+         });
+
+         if (!res.ok) throw new Error(`DDQN error: ${res.status}`);
+         const d = await res.json();
+
+         if (d.status !== "success" || !d.recommended_task_id) {
+           break; // Berhenti jika AI error atau tidak ada rekomendasi
+         }
+
+         // 3. Cari tugas yang direkomendasikan AI
+         const recTask = localTasks.find((t) => t.id === d.recommended_task_id);
+         if (!recTask) break;
+
+         // 4. Masukkan ke dalam slot kalender UI
+         const startSlot = Math.round(currTimeHour * 2);
+         const slotsNeeded = Math.max(1, Math.round(recTask.duration * 2));
+
+         sched.push({
+           ...recTask,
+           scheduled_start: startSlot,
+           scheduled_slots: slotsNeeded,
+           assigned_block: "AI",
+         });
+
+         // 5. Majukan waktu simulasi untuk tugas selanjutnya
+         currTimeHour += recTask.duration;
+
+         // Hapus tugas yang sudah dijadwalkan dari antrean
+         localTasks = localTasks.filter((t) => t.id !== d.recommended_task_id);
       }
-      setScheduleLoading(false);
-    } else {
-      const r = generateScheduleFallback(remainingTasks, fixedBlocks, vibe, characterType);
-      setSchedule(r.scheduled);
-      setManagerBlocks(r.managerBlocks);
+
+      setSchedule(sched);
       setView("schedule");
+      showToast("AI Schedule Generated!", "success");
+
+    } catch (err) {
+      console.error(err);
+      showToast("AI DDQN gagal dihubungi. Tidak ada data yang tersusun.", "error");
     }
+    setScheduleLoading(false);
   };
 
   const activeTasks = tasks.filter((t) => !t.is_archived);
@@ -562,12 +604,8 @@ RULES:
             {view === "dashboard" && (
               <>
                 <button style={S.btn} onClick={() => { setShowAddTask(!showAddTask); setForm((f) => ({ ...f, is_fixed: false })); }}>+ Task</button>
-                <div style={{ display: "flex", borderRadius: 6, border: "1px solid rgba(255,255,255,0.1)", overflow: "hidden" }}>
-                  <button onClick={() => setUseAI(true)} style={{ padding: "6px 10px", fontSize: 10, cursor: "pointer", border: "none", background: useAI ? "rgba(52,211,153,0.15)" : "transparent", color: useAI ? "#34d399" : "#71717a" }}>AI (DQN)</button>
-                  <button onClick={() => setUseAI(false)} style={{ padding: "6px 10px", fontSize: 10, cursor: "pointer", border: "none", background: !useAI ? "rgba(245,158,11,0.15)" : "transparent", color: !useAI ? "#f59e0b" : "#71717a" }}>Heuristic</button>
-                </div>
                 <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={doGenerate} disabled={scheduleLoading}>
-                  {scheduleLoading ? "⏳ Scheduling..." : useAI ? "◈ AI Schedule" : "◈ Generate Plan"}
+                  {scheduleLoading ? "⏳ Scheduling..." : "◈ AI Schedule"}
                 </button>
               </>
             )}
@@ -577,53 +615,55 @@ RULES:
 
         <div style={S.content}>
           {view === "dashboard" && (
-             <div style={{ marginBottom: 16, padding: "16px", borderRadius: 8, background: "rgba(255,255,255,0.03)", border: nlLoading ? "1px solid rgba(52,211,153,0.4)" : "1px solid rgba(255,255,255,0.06)" }}>
-               <div style={{ fontSize: 10, color: "#3f3f46", letterSpacing: 2, fontWeight: 600, marginBottom: 8 }}>NATURAL LANGUAGE INPUT (GEMINI)</div>
-               <div style={{ display: "flex", gap: 8 }}>
-                 <textarea rows={2} placeholder="Describe your day... (e.g. ada kelas jam 12, tugas ML deadline 23:59)" value={nlInput} onChange={(e) => setNlInput(e.target.value)} style={{ ...S.input, resize: "none" }} />
-                 <button onClick={handleNlParse} disabled={nlLoading || !nlInput.trim()} style={{ ...S.btnP, minWidth: 120 }}>{nlLoading ? "⏳ Parsing..." : "Parse with AI"}</button>
-               </div>
-               {nlError && <div style={{ marginTop: 6, fontSize: 10, color: "#fca5a5" }}>{nlError}</div>}
-             </div>
-          )}
+            <div style={{ display: "flex", gap: 24, height: "100%" }}>
+              {/* Left Side: Tasks and Inputs */}
+              <div style={{ flex: "1 1 60%", display: "flex", flexDirection: "column", gap: 16 }}>
+                <div style={{ padding: "16px", borderRadius: 8, background: "rgba(255,255,255,0.03)", border: nlLoading ? "1px solid rgba(52,211,153,0.4)" : "1px solid rgba(255,255,255,0.06)" }}>
+                  <div style={{ fontSize: 10, color: "#3f3f46", letterSpacing: 2, fontWeight: 600, marginBottom: 8 }}>NATURAL LANGUAGE INPUT (GEMINI)</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <textarea rows={2} placeholder="Describe your day... (e.g. ada kelas jam 12, tugas ML deadline 23:59)" value={nlInput} onChange={(e) => setNlInput(e.target.value)} style={{ ...S.input, resize: "none" }} />
+                    <button onClick={handleNlParse} disabled={nlLoading || !nlInput.trim()} style={{ ...S.btnP, minWidth: 120 }}>{nlLoading ? "⏳ Parsing..." : "Parse with AI"}</button>
+                  </div>
+                  {nlError && <div style={{ marginTop: 6, fontSize: 10, color: "#fca5a5" }}>{nlError}</div>}
+                </div>
 
-          {showAddTask && view === "dashboard" && (
-             <div style={{ ...S.card, flexDirection: "column", alignItems: "stretch", gap: 12, marginBottom: 16 }}>
-               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                 <button onClick={() => setForm((f) => ({ ...f, is_fixed: false }))} style={{ ...S.btn, background: !form.is_fixed ? "rgba(52,211,153,0.15)" : "transparent", color: !form.is_fixed ? "#34d399" : "#71717a" }}>Flexible Task</button>
-                 <button onClick={() => setForm((f) => ({ ...f, is_fixed: true }))} style={{ ...S.btn, background: form.is_fixed ? "rgba(99,102,241,0.15)" : "transparent", color: form.is_fixed ? "#818cf8" : "#71717a" }}>Fixed Block</button>
-               </div>
-               <div style={{ display: "grid", gridTemplateColumns: form.is_fixed ? "2fr 1fr 1fr" : "2fr 1fr", gap: 8 }}>
-                 <input placeholder={form.is_fixed ? "Block name" : "Task title"} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} style={S.input} />
-                 {form.is_fixed ? (
-                   <>
-                     <div><label style={{fontSize:9}}>START</label><input type="time" value={form.startTime} onChange={(e) => setForm({ ...form, startTime: e.target.value })} style={S.input} /></div>
-                     <div><label style={{fontSize:9}}>END</label><input type="time" value={form.endTime} onChange={(e) => setForm({ ...form, endTime: e.target.value })} style={S.input} /></div>
-                   </>
-                 ) : (
-                   <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} style={S.select}>
-                     <option value="analytical">Analytical</option>
-                     <option value="routine">Routine</option>
-                     <option value="creative">Creative</option>
-                   </select>
-                 )}
-               </div>
-               {!form.is_fixed && (
-                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
-                   <div><label style={{fontSize:9}}>DURATION (min)</label><input type="number" value={form.duration_estimate} onChange={e => setForm({...form, duration_estimate: +e.target.value})} style={S.input}/></div>
-                   <div><label style={{fontSize:9}}>PRIORITY</label><select value={form.priority} onChange={e => setForm({...form, priority: +e.target.value})} style={S.select}>{[1,2,3,4,5].map(i => <option key={i} value={i}>{i}</option>)}</select></div>
-                   <div><label style={{fontSize:9}}>COGNITIVE DEMAND</label><select value={form.cognitive_demand} onChange={e => setForm({...form, cognitive_demand: +e.target.value})} style={S.select}>{[1,2,3,4,5].map(i => <option key={i} value={i}>{i}</option>)}</select></div>
-                   <div><label style={{fontSize:9}}>DEADLINE</label><input type="time" value={form.deadline} onChange={e => setForm({...form, deadline: e.target.value})} style={S.input} /></div>
-                 </div>
-               )}
-               <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                 <button onClick={addTask} style={S.btnP}>Add</button>
-               </div>
-             </div>
-          )}
+                {showAddTask && (
+                  <div style={{ ...S.card, flexDirection: "column", alignItems: "stretch", gap: 12 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <button onClick={() => setForm((f) => ({ ...f, is_fixed: false }))} style={{ ...S.btn, background: !form.is_fixed ? "rgba(52,211,153,0.15)" : "transparent", color: !form.is_fixed ? "#34d399" : "#71717a" }}>Flexible Task</button>
+                      <button onClick={() => setForm((f) => ({ ...f, is_fixed: true }))} style={{ ...S.btn, background: form.is_fixed ? "rgba(99,102,241,0.15)" : "transparent", color: form.is_fixed ? "#818cf8" : "#71717a" }}>Fixed Block</button>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: form.is_fixed ? "2fr 1fr 1fr" : "2fr 1fr", gap: 8 }}>
+                      <input placeholder={form.is_fixed ? "Block name" : "Task title"} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} style={S.input} />
+                      {form.is_fixed ? (
+                        <>
+                          <div><label style={{fontSize:9}}>START</label><input type="time" value={form.startTime} onChange={(e) => setForm({ ...form, startTime: e.target.value })} style={S.input} /></div>
+                          <div><label style={{fontSize:9}}>END</label><input type="time" value={form.endTime} onChange={(e) => setForm({ ...form, endTime: e.target.value })} style={S.input} /></div>
+                        </>
+                      ) : (
+                        <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} style={S.select}>
+                          <option value="analytical">Analytical</option>
+                          <option value="routine">Routine</option>
+                          <option value="creative">Creative</option>
+                        </select>
+                      )}
+                    </div>
+                    {!form.is_fixed && (
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+                        <div><label style={{fontSize:9}}>DURATION (min)</label><input type="number" value={form.duration_estimate} onChange={e => setForm({...form, duration_estimate: +e.target.value})} style={S.input}/></div>
+                        <div><label style={{fontSize:9}}>PRIORITY</label><select value={form.priority} onChange={e => setForm({...form, priority: +e.target.value})} style={S.select}>{[1,2,3,4,5].map(i => <option key={i} value={i}>{i}</option>)}</select></div>
+                        <div><label style={{fontSize:9}}>COGNITIVE DEMAND</label><select value={form.cognitive_demand} onChange={e => setForm({...form, cognitive_demand: +e.target.value})} style={S.select}>{[1,2,3,4,5].map(i => <option key={i} value={i}>{i}</option>)}</select></div>
+                        <div><label style={{fontSize:9}}>DEADLINE</label><input type="time" value={form.deadline} onChange={e => setForm({...form, deadline: e.target.value})} style={S.input} /></div>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                      <button onClick={addTask} style={S.btnP}>Add</button>
+                    </div>
+                  </div>
+                )}
 
-          {view === "dashboard" && (
-            <>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12, overflowY: "auto", paddingRight: 8 }}>
+                  <div style={{ fontSize: 11, color: "#a1a1aa", letterSpacing: 1 }}>FLEXIBLE TASKS</div>
               {activeTasks.map((task) => {
                 const elapsed = getElapsed(task);
                 const isLate = task.deadline && deadlineToHour(task.deadline) < (new Date().getHours() + new Date().getMinutes() / 60);
@@ -656,47 +696,20 @@ RULES:
                   </div>
                 );
               })}
-            </>
+                </div>
+              </div>
+
+              {/* Right Side: Timeline */}
+              <div style={{ flex: "1 1 40%", borderLeft: "1px solid rgba(255,255,255,0.06)", paddingLeft: 24, height: "100%", overflowY: "auto", paddingRight: 8 }}>
+                <div style={{ fontSize: 13, color: "#a1a1aa", letterSpacing: 1, fontWeight: 700, marginBottom: 12 }}>TODAY'S SCHEDULE</div>
+                <DailyTimeline schedule={schedule} fixedBlocks={fixedBlocks} energyProfile={energyProfile} />
+              </div>
+            </div>
           )}
 
           {view === "schedule" && (
-             <div style={{ display: "grid", gridTemplateColumns: "50px 1fr 60px" }}>
-               {Array.from({ length: TOTAL_SLOTS }, (_, slot) => {
-                  const time = slotToTime(slot);
-                  const isHour = slot % 2 === 0;
-                  const fixedHere = fixedBlocks.find((fb) => slot >= fb.startSlot && slot < fb.endSlot);
-                  const scheduledHere = schedule.find((s) => slot >= s.scheduled_start && slot < s.scheduled_start + s.scheduled_slots);
-                  const ep = energyProfile[slot];
-                  const barH = Math.min(100, (ep / maxEnergy) * 100);
-                  const isCurrent = slot === nowSlot;
-                  const isPast = slot < nowSlot;
-                  
-                  return (
-                    <div key={slot} style={{ display: "contents" }}>
-                      <div style={{ fontSize: 10, color: isCurrent ? "#34d399" : isHour ? "#52525b" : "#27272a", padding: "4px 0" }}>{isHour ? time : ""}</div>
-                      <div style={{ padding: "2px 0", minHeight: 28, background: isCurrent ? "rgba(52,211,153,0.03)" : "transparent" }}>
-                        {fixedHere && slot === fixedHere.startSlot && (
-                           <div style={{ background: "rgba(99,102,241,0.1)", borderRadius: 6, padding: "6px", height: (fixedHere.endSlot - fixedHere.startSlot) * 28 - 4 }}>
-                             <span style={{ fontSize: 10, color: "#818cf8" }}>{fixedHere.title}</span>
-                           </div>
-                        )}
-                        {scheduledHere && slot === scheduledHere.scheduled_start && (() => {
-                          const c = BLOCK_COLORS[scheduledHere.task_type] || BLOCK_COLORS["routine"];
-                          return (
-                            <div style={{ background: c.bg, borderLeft: `3px solid ${c.border}`, padding: "6px", height: scheduledHere.scheduled_slots * 28 - 4 }}>
-                              <span style={{ fontSize: 11, color: c.text, fontWeight: 700 }}>{scheduledHere.title}</span>
-                            </div>
-                          )
-                        })()}
-                      </div>
-                      <div style={{ padding: "4px 8px", display: "flex", alignItems: "center" }}>
-                        <div style={{ width: "100%", height: 6, background: "#18181b", borderRadius: 3 }}>
-                          <div style={{ width: `${barH}%`, height: "100%", borderRadius: 3, background: ep > 0.7 ? "#34d399" : ep > 0.4 ? "#f59e0b" : "#ef4444" }} />
-                        </div>
-                      </div>
-                    </div>
-                  );
-               })}
+             <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100%", color: "#a1a1aa" }}>
+               <h1>Weekly Multi-Day Calendar (WIP) ...</h1>
              </div>
           )}
 
