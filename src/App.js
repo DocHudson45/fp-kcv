@@ -722,6 +722,7 @@ Input: "meeting 10-11 pagi"
       const endOfDayHour = 23.99;
       
       console.log(`Current time: ${nowDate.getHours()}:${String(nowDate.getMinutes()).padStart(2, '0')} (${nowHour.toFixed(2)} hours)`);
+      console.log(`API_URL: ${API_URL}`);
       
       // Helper: Check if a time slot overlaps with any fixed block OR scheduled task
       const isSlotOccupied = (startSlot, slotsNeeded, existingSched) => {
@@ -796,19 +797,19 @@ Input: "meeting 10-11 pagi"
       while (localTasks.length > 0 && sanity > 0) {
          sanity--;
          
-         // 1. Siapkan Payload untuk API Modal
+         // Use local DDQN API endpoint format (correct format)
          const payload = {
            user_id: "radit_001",
-           current_hour: currTimeHour, // expected by Modal DDQN
+           current_hour: currTimeHour,
            current_day: 0,
            chronotype: characterType,
            current_vibe: vibe,
            tasks_today: localTasks.map((t) => ({
              id: t.id,
-             duration: parseFloat(t.duration) || 0.5, // float hours
-             deadline: deadlineToHour(t.deadline), // float hour
-             importance: priorityToImportance(t.priority), // float 0-1
-             cognitive_demand: t.cognitive_demand / 5.0, // float 0-1
+             duration: parseFloat(t.duration) || 0.5,
+             deadline: deadlineToHour(t.deadline),
+             importance: priorityToImportance(t.priority),
+             cognitive_demand: t.cognitive_demand / 5.0,
              task_type: t.task_type || "routine",
              partial_done: t.partial_done || 0.0
            })),
@@ -817,33 +818,39 @@ Input: "meeting 10-11 pagi"
 
          // Log payload on first call
          if (isFirstCall) {
-           console.log("=== API PAYLOAD (First Call) ===");
+           console.log(`=== API PAYLOAD (DDQN Format) ===`);
            console.log(JSON.stringify(payload, null, 2));
            setDebugPayload(payload);
            isFirstCall = false;
          }
 
-         // 2. Tembak API
+         // 2. Call API
          const res = await fetch(API_URL, {
            method: "POST",
            headers: { "Content-Type": "application/json" },
            body: JSON.stringify(payload),
          });
 
-         if (!res.ok) throw new Error(`DDQN error: ${res.status}`);
+         if (!res.ok) throw new Error(`API error: ${res.status}`);
          const d = await res.json();
 
          console.log("=== API RESPONSE ===");
          console.log(JSON.stringify(d, null, 2));
          setDebugResponse(d);
 
+         // Parse response - expect DDQN format
          if (d.status !== "success" || !d.recommended_task_id) {
-           break; // Berhenti jika AI error atau tidak ada rekomendasi
+           console.log("DDQN API: Error or no recommendation");
+           break;
          }
+         const recommendedTaskId = d.recommended_task_id;
 
-         // 3. Cari tugas yang direkomendasikan AI
-         const recTask = localTasks.find((t) => t.id === d.recommended_task_id);
-         if (!recTask) break;
+         // 3. Find recommended task
+         const recTask = localTasks.find((t) => t.id === recommendedTaskId);
+         if (!recTask) {
+           console.log(`Task not found: ${recommendedTaskId}`);
+           break;
+         }
 
          // 4. Find available slot that doesn't overlap with fixed blocks or existing schedule
          const slotsNeeded = Math.max(1, Math.round(recTask.duration * 2));
@@ -863,19 +870,23 @@ Input: "meeting 10-11 pagi"
            assigned_block: "AI",
          });
 
-         // 5. Majukan waktu simulasi untuk tugas selanjutnya (setelah task yang dijadwalkan)
+         // Advance time for next task (after scheduled task)
          currTimeHour = availableSlot.hour + recTask.duration;
 
-         // Hapus tugas yang sudah dijadwalkan dari antrean
-         localTasks = localTasks.filter((t) => t.id !== d.recommended_task_id);
+         // Remove scheduled task from queue
+         localTasks = localTasks.filter((t) => t.id !== recommendedTaskId);
       }
 
       setSchedule(sched);
-      showToast("AI Schedule Generated!", "success");
+      if (sched.length > 0) {
+        showToast("AI Schedule Generated!");
+      } else {
+        showToast("⚠️ No schedule generated. Check API or try fallback scheduler.");
+      }
 
     } catch (err) {
-      console.error(err);
-      showToast("AI DDQN gagal dihubungi. Tidak ada data yang tersusun.", "error");
+      console.error("Schedule generation error:", err);
+      showToast(`Error: ${err.message}`);
     }
     setScheduleLoading(false);
   };
