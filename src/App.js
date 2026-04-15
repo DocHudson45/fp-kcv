@@ -73,6 +73,7 @@ const DailyTimeline = ({ schedule, fixedBlocks, energyProfile }) => {
               return (
                 <div
                   key={slot}
+                  className="timeline-slot"
                   style={{
                     position: "absolute",
                     top: slot * SLOT_HEIGHT,

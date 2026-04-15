@@ -40,3 +40,13 @@ code {
     border-color: rgba(52, 211, 153, 0.6);
   }
 }
+
+/* Ensure DailyTimeline slot heights remain consistently fixed at 40px */
+/* This prevents CSS cascade from reducing heights to 28px or using min-height instead of height */
+.timeline-slot {
+  height: 40px !important;
+  min-height: 40px !important;
+  max-height: 40px !important;
+  padding: 2px 8px !important;
+}
+
