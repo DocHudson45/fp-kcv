@@ -30,12 +30,13 @@ const DailyTimeline = ({ schedule, fixedBlocks, energyProfile }) => {
   const nowSlot = now.getHours() * 2 + Math.floor(now.getMinutes() / 30);
   const maxEnergy = Math.max(...energyProfile, 1);
   const SLOT_HEIGHT = 40; // Fixed height per 30-min slot in pixels
+  const TOTAL_HEIGHT = SLOT_HEIGHT * TOTAL_SLOTS; // 48 slots * 40px = 1920px
 
   return (
-    <div style={{ position: "relative" }}>
+    <div style={{ position: "relative", minHeight: TOTAL_HEIGHT, width: "100%" }}>
       {/* Time labels on the left */}
-      <div style={{ display: "flex", gap: 12 }}>
-        <div style={{ width: 50 }}>
+      <div style={{ display: "flex", gap: 12, height: "100%" }}>
+        <div style={{ width: 50, flexShrink: 0, position: "relative", height: TOTAL_HEIGHT }}>
           {Array.from({ length: 24 }, (_, h) => (
             <div
               key={h}
@@ -49,6 +50,9 @@ const DailyTimeline = ({ schedule, fixedBlocks, energyProfile }) => {
                 paddingTop: 4,
                 paddingRight: 8,
                 textAlign: "right",
+                position: "absolute",
+                top: h * SLOT_HEIGHT * 2,
+                width: "100%",
               }}
             >
               {String(h).padStart(2, "0")}:00
@@ -57,9 +61,9 @@ const DailyTimeline = ({ schedule, fixedBlocks, energyProfile }) => {
         </div>
 
         {/* Main calendar grid */}
-        <div style={{ flex: 1, position: "relative", borderLeft: "1px solid rgba(255,255,255,0.1)" }}>
+        <div style={{ flex: 1, position: "relative", borderLeft: "1px solid rgba(255,255,255,0.1)", height: TOTAL_HEIGHT, width: "100%" }}>
           {/* Draw all slots with fixed height */}
-          <div style={{ position: "relative" }}>
+          <div style={{ position: "absolute", top: 0, left: 0, right: 0, width: "100%", height: TOTAL_HEIGHT }}>
             {Array.from({ length: TOTAL_SLOTS }, (_, slot) => {
               const isHour = slot % 2 === 0;
               const isCurrent = slot === nowSlot;
@@ -1169,7 +1173,7 @@ Input: "meeting 10-11 pagi"
               </div>
 
               {/* Right Side: Timeline */}
-              <div style={{ flex: "1 1 40%", borderLeft: "1px solid rgba(255,255,255,0.06)", paddingLeft: 24, height: "100%", overflowY: "auto", paddingRight: 8 }}>
+              <div style={{ flex: "1 1 40%", borderLeft: "1px solid rgba(255,255,255,0.06)", paddingLeft: 24, overflowY: "auto", overflowX: "hidden", paddingRight: 8, minHeight: 0 }}>
                 <div style={{ fontSize: 13, color: "#a1a1aa", letterSpacing: 1, fontWeight: 700, marginBottom: 12 }}>TODAY'S SCHEDULE</div>
                 <DailyTimeline schedule={schedule} fixedBlocks={fixedBlocks} energyProfile={energyProfile} />
               </div>
