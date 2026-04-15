@@ -303,7 +303,10 @@ export default function App() {
       })
     );
 
-  const discardTask = (id) => setTasks((prev) => prev.filter((t) => t.id !== id));
+  const discardTask = (id) => {
+    setTasks((prev) => prev.filter((t) => t.id !== id));
+    setSchedule((prev) => prev.filter((s) => s.id !== id));
+  };
 
   // Abandon logic => add partial completion, record history
   const abandonTask = (id) => {
@@ -324,6 +327,7 @@ export default function App() {
         };
       })
     );
+    setSchedule((prev) => prev.filter((s) => s.id !== id));
     showToast("Task abandoned & partial progress saved.");
   };
 
@@ -358,6 +362,7 @@ export default function App() {
         return { ...t, is_archived: true, is_running: false };
       })
     );
+    setSchedule((prev) => prev.filter((s) => s.id !== id));
     // Vibe check #2 
     const vibe2 = window.prompt("Task complete! How is your energy now? (1-5)", ""+Math.round(vibe * 5));
     if (vibe2) {
@@ -707,16 +712,20 @@ Input: "meeting 10-11 pagi"
     setShowDebug(true);
     try {
       // Use actual current time
-      const nowHour = new Date().getHours() + new Date().getMinutes() / 60;
+      const nowDate = new Date();
+      const nowHour = nowDate.getHours() + nowDate.getMinutes() / 60;
       const endOfDayHour = 23.99;
+      
+      console.log(`Current time: ${nowDate.getHours()}:${String(nowDate.getMinutes()).padStart(2, '0')} (${nowHour.toFixed(2)} hours)`);
       
       // Helper: Check if a time slot overlaps with any fixed block OR scheduled task
       const isSlotOccupied = (startSlot, slotsNeeded, existingSched) => {
         const taskStart = startSlot;
         const taskEnd = startSlot + slotsNeeded;
         
-        // Check fixed blocks
+        // Check fixed blocks - ensure they have slot properties
         const fixedOverlap = fixedBlocks.some(fb => {
+          if (!fb.startSlot || !fb.endSlot) return false; // Skip if missing slot info
           return !(taskEnd <= fb.startSlot || taskStart >= fb.endSlot);
         });
         
@@ -736,22 +745,34 @@ Input: "meeting 10-11 pagi"
         const slotsNeeded = Math.max(1, Math.round(duration * 2));
         const endOfDay = 46; // 23:00
         
-        // Scan every 0.5-hour slot
-        for (let slot = Math.round(fromHour * 2); slot + slotsNeeded <= endOfDay; slot++) {
+        // Start from a properly calculated slot, ensuring we don't go backwards in time
+        let startSlot = Math.ceil(fromHour * 2); // Use ceil to round up to next slot
+        if (startSlot < 0) startSlot = 0;
+        
+        console.log(`Finding slot for ${duration}h task starting from hour ${fromHour.toFixed(2)} (slot ${startSlot})`);
+        
+        // Scan every slot from now onwards
+        for (let slot = startSlot; slot + slotsNeeded <= endOfDay; slot++) {
           if (!isSlotOccupied(slot, slotsNeeded, existingSched)) {
-            console.log(`Found available slot at ${slot} (hour ${slot / 2}) for ${duration}h task`);
-            return { slot, hour: slot / 2 };
+            const schedHour = slot / 2;
+            console.log(`Found available slot ${slot} (hour ${schedHour.toFixed(2)}) for ${duration}h task`);
+            return { slot, hour: schedHour };
           }
         }
         
-        console.log(`No available slot found for ${duration}h task starting from hour ${fromHour}`);
+        console.log(`No available slot found for ${duration}h task starting from hour ${fromHour.toFixed(2)}`);
         return null;
       };
       
-      // Filter flexible tasks from current time to end of day
+      // Filter flexible tasks that have NOT passed their deadline yet
       const tasksToSchedule = activeTasks.filter(t => {
         const taskDeadline = deadlineToHour(t.deadline);
-        return taskDeadline >= nowHour;
+        // Only include tasks with future deadlines (or no deadline)
+        const isViable = !t.deadline || taskDeadline > nowHour;
+        if (!isViable) {
+          console.log(`Skipping task "${t.title}" with expired deadline ${t.deadline} (${taskDeadline.toFixed(2)} < ${nowHour.toFixed(2)})`);
+        }
+        return isViable;
       });
       
       // Modal DDQN API requires building schedule incrementally.
@@ -854,7 +875,34 @@ Input: "meeting 10-11 pagi"
     setScheduleLoading(false);
   };
 
-  const activeTasks = tasks.filter((t) => !t.is_archived);
+  // Reorder active tasks based on schedule order if schedule exists
+  const getOrderedActiveTasks = () => {
+    const unarchived = tasks.filter((t) => !t.is_archived);
+    if (schedule.length === 0) return unarchived;
+    
+    const ordered = [];
+    const scheduled = new Set();
+    
+    // Add tasks in schedule order
+    for (const s of schedule) {
+      const task = unarchived.find(t => t.id === s.id);
+      if (task) {
+        ordered.push(task);
+        scheduled.add(s.id);
+      }
+    }
+    
+    // Add unscheduled tasks at the end
+    for (const t of unarchived) {
+      if (!scheduled.has(t.id)) {
+        ordered.push(t);
+      }
+    }
+    
+    return ordered;
+  };
+
+  const activeTasks = getOrderedActiveTasks();
   const archivedTasks = tasks.filter((t) => t.is_archived);
   const runningTask = tasks.find((t) => t.is_running);
   const getElapsed = (t) =>
