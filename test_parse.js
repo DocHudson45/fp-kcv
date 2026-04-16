@@ -1,4 +1,4 @@
-require('dotenv').config({ path: '.env.local' });
+require('dotenv').config({ path: '.env.production' });
 const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
 const nlInput = "Ada kelas PAA jam 1 PM - 3 PM";
 

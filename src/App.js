@@ -467,7 +467,7 @@ export default function App() {
     if (!nlInput.trim()) return;
     const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
     if (!apiKey) {
-      setNlError("REACT_APP_GEMINI_API_KEY is missing in .env.local");
+      setNlError("REACT_APP_GEMINI_API_KEY is missing in .env");
       return;
     }
 
@@ -798,22 +798,24 @@ Input: "meeting 10-11 pagi"
          sanity--;
          
          // Use local DDQN API endpoint format (correct format)
+         const currentIsoDate = new Date();
+         currentIsoDate.setHours(Math.floor(currTimeHour), Math.round((currTimeHour % 1) * 60), 0, 0);
+
          const payload = {
-           user_id: "radit_001",
-           current_hour: currTimeHour,
-           current_day: 0,
+           user_id: "user_001",
+           current_time_iso: currentIsoDate.toISOString(),
            chronotype: characterType,
            current_vibe: vibe,
-           tasks_today: localTasks.map((t) => ({
+           entries: localTasks.map((t) => ({
              id: t.id,
-             duration: parseFloat(t.duration) || 0.5,
-             deadline: deadlineToHour(t.deadline),
-             importance: priorityToImportance(t.priority),
-             cognitive_demand: t.cognitive_demand / 5.0,
-             task_type: t.task_type || "routine",
-             partial_done: t.partial_done || 0.0
-           })),
-           user_history_records: historyRecords
+             type: "flexible",
+             title: t.title,
+             category: t.task_type || "routine",
+             duration: `${Math.round((parseFloat(t.duration) || 0.5) * 60)}m`,
+             priority: t.priority || 3,
+             cognitive_demand: t.cognitive_demand || 3,
+             deadline: t.deadline || null
+           }))
          };
 
          // Log payload on first call
