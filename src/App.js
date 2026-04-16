@@ -465,11 +465,8 @@ export default function App() {
 
   const handleNlParse = async () => {
     if (!nlInput.trim()) return;
-    const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
-    if (!apiKey) {
-      setNlError("REACT_APP_GEMINI_API_KEY is missing in .env");
-      return;
-    }
+    // API key check is handled conditionally depending on whether it's production
+
 
     setNlLoading(true);
     setNlError("");
@@ -557,14 +554,16 @@ Input: "meeting 10-11 pagi"
         },
       };
 
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        }
-      );
+      const isDev = process.env.NODE_ENV !== "production";
+      const parseUrl = isDev
+        ? `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.REACT_APP_GEMINI_API_KEY}`
+        : "/api/parse";
+
+      const res = await fetch(parseUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
       if (!res.ok) {
         const errText = await res.text();
@@ -572,7 +571,10 @@ Input: "meeting 10-11 pagi"
         try {
            const errJson = JSON.parse(errText);
            if (errJson.error && errJson.error.message) errMsg = errJson.error.message;
-        } catch(e) {}
+           else if (errJson.error) errMsg = JSON.stringify(errJson.error);
+        } catch(e) {
+           errMsg = errText || `Error ${res.status}`;
+        }
         throw new Error(`${res.status}: ${errMsg}`);
       }
       const apiRes = await res.json();
