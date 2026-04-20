@@ -5,10 +5,14 @@ import {
   TOTAL_SLOTS,
   ENERGY_LABELS,
   BLOCK_COLORS,
+  buildEnergyProfile,
   buildRLEnergyProfile,
   getRLSummary,
   fmt,
+  slotToTime,
   deadlineToHour,
+  priorityToImportance,
+  cogDemandStrToFloat,
 } from "./utils";
 import { db } from "./db";
 
@@ -174,7 +178,7 @@ export default function App() {
   const [bufferPool, setBufferPool] = useState(() => db.getBufferPool());
   const [showAddTask, setShowAddTask] = useState(false);
   const [, setTick] = useState(0);
-  const [weekViewKey] = useState(0); // Force re-render week view
+  const [weekViewKey, setWeekViewKey] = useState(0); // Force re-render week view
   const [form, setForm] = useState({
     title: "",
     category: "analytical",
@@ -194,9 +198,7 @@ export default function App() {
   const [historyRecords, setHistoryRecords] = useState(() => db.getHistory());
   const [toastMsg, setToastMsg] = useState("");
   const [nlError, setNlError] = useState("");
-  const [debugPayload, setDebugPayload] = useState(null);
-  const [debugResponse, setDebugResponse] = useState(null);
-  const [showDebug, setShowDebug] = useState(false);
+
   const [editingItemId, setEditingItemId] = useState(null);
   const [editingItemType, setEditingItemType] = useState(null); // "task" or "fixed"
   const [editForm, setEditForm] = useState({
@@ -790,6 +792,7 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
 
   // ========== BUFFER CHECK: intercept before doGenerate ==========
   const handleAISchedule = () => {
+    const today = getNow().toISOString().split("T")[0];
     const tomorrow = new Date(getNow().getTime());
     tomorrow.setDate(tomorrow.getDate() + 1);
     const tomorrowStr = tomorrow.toISOString().split("T")[0];
@@ -811,6 +814,7 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
 
   const handleBufferConfirm = () => {
     const accepted = bufferPromptTasks.filter(t => t._accepted === true);
+    const declined = bufferPromptTasks.filter(t => t._accepted === false || t._accepted === null);
 
     // Move accepted tasks to active
     if (accepted.length > 0) {
@@ -841,11 +845,11 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
     // Only schedule flexible tasks. Fixed blocks are handled separately in fixedBlocks array.
     // Ensure no fixed events are included in API calls.
     setScheduleLoading(true);
-    setShowDebug(true);
     try {
       // Use actual current time
       const nowDate = getNow();
       const nowHour = nowDate.getHours() + nowDate.getMinutes() / 60;
+      const endOfDayHour = 23.99;
       
       // If generating late at night (after 21:00), schedule for tomorrow morning
       const WAKE_HOURS = { morning: 5, intermediate: 7, evening: 9 };
@@ -974,7 +978,7 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
          if (isFirstCall) {
            console.log(`=== API PAYLOAD (DDQN Format) ===`);
            console.log(JSON.stringify(payload, null, 2));
-           setDebugPayload(payload);
+
            isFirstCall = false;
          }
 
@@ -990,7 +994,6 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
 
          console.log("=== API RESPONSE ===");
          console.log(JSON.stringify(d, null, 2));
-         setDebugResponse(d);
 
          // Parse response - expect DDQN format
          if (d.status !== "success" || !d.recommended_task_id) {
@@ -1082,6 +1085,7 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
 
   const activeTasks = getOrderedActiveTasks();
   const archivedTasks = tasks.filter((t) => t.is_archived);
+  const runningTask = tasks.find((t) => t.is_running);
   const getElapsed = (t) =>
     !t.is_running || !t.last_started_at
       ? t.total_duration
@@ -1096,6 +1100,8 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
     () => getRLSummary(historyRecords),
     [historyRecords]
   );
+  const maxEnergy = Math.max(...energyProfile);
+  const nowSlot = getNow().getHours() * 2 + (getNow().getMinutes() >= 30 ? 1 : 0);
 
   const S = {
     app: { display: "flex", height: "100vh", background: "#09090b", color: "#e4e4e7", overflow: "hidden", fontSize: 13 },
@@ -1463,7 +1469,6 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
                </div>
 
 
-
                {/* Week view: Shows last 6 days + today (7 days total with history) */}
                <div key={`week-${weekViewKey}`} style={{ flex: 1, display: "flex", gap: 1, overflowX: "auto", overflowY: "auto", background: "rgba(255,255,255,0.01)", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", padding: 12 }}>
                  {Array.from({ length: 7 }, (_, dayIdx) => {
@@ -1616,33 +1621,7 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
             </div>
           )}
 
-          {/* Debug Panel */}
-          {showDebug && (debugPayload || debugResponse) && (
-            <div style={{ marginTop: 24, padding: 16, background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#34d399" }}>🐛 DEBUG: API Calls</div>
-                <button onClick={() => setShowDebug(false)} style={{ ...S.btn, color: "#ef4444" }}>Close Debug</button>
-              </div>
-              
-              {debugPayload && (
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: "#818cf8", marginBottom: 8 }}>REQUEST PAYLOAD:</div>
-                  <pre style={{ background: "rgba(0,0,0,0.5)", padding: 8, borderRadius: 4, overflow: "auto", maxHeight: 200, fontSize: 9, color: "#a1a1aa", fontFamily: "monospace" }}>
-                    {JSON.stringify(debugPayload, null, 2)}
-                  </pre>
-                </div>
-              )}
-              
-              {debugResponse && (
-                <div>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: "#34d399", marginBottom: 8 }}>API RESPONSE:</div>
-                  <pre style={{ background: "rgba(0,0,0,0.5)", padding: 8, borderRadius: 4, overflow: "auto", maxHeight: 200, fontSize: 9, color: "#a1a1aa", fontFamily: "monospace" }}>
-                    {JSON.stringify(debugResponse, null, 2)}
-                  </pre>
-                </div>
-              )}
-            </div>
-          )}
+
         </div>
       </div>
       {toastMsg && <div style={{ position: "fixed", bottom: 24, right: 24, padding: "10px", background: "rgba(30,30,30,0.95)", border: "1px solid #fbbf24", color: "#fbbf24", borderRadius: 8 }}>{toastMsg}</div>}
