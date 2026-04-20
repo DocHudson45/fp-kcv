@@ -5,28 +5,14 @@ import {
   TOTAL_SLOTS,
   ENERGY_LABELS,
   BLOCK_COLORS,
-  buildEnergyProfile,
   buildRLEnergyProfile,
   getRLSummary,
-  localRLScheduler,
   fmt,
-  slotToTime,
   deadlineToHour,
-  priorityToImportance,
-  cogDemandStrToFloat,
 } from "./utils";
 import { db } from "./db";
 
-// ========== DEBUG: Set to a static time for testing ==========
-// Set to null to use real time, or set a Date for a fixed debug time
-const DEBUG_TIME = (() => {
-  const d = new Date();
-  d.setHours(5, 0, 0, 0); // 5:00 AM
-  return d;
-})();
-
-const getNow = () => (DEBUG_TIME ? new Date(DEBUG_TIME.getTime()) : new Date());
-// =============================================================
+const getNow = () => new Date();
 
 const PriorityDots = ({ level }) => (
   <span style={{ display: "inline-flex", gap: 2 }}>
@@ -188,7 +174,7 @@ export default function App() {
   const [bufferPool, setBufferPool] = useState(() => db.getBufferPool());
   const [showAddTask, setShowAddTask] = useState(false);
   const [, setTick] = useState(0);
-  const [weekViewKey, setWeekViewKey] = useState(0); // Force re-render week view
+  const [weekViewKey] = useState(0); // Force re-render week view
   const [form, setForm] = useState({
     title: "",
     category: "analytical",
@@ -286,193 +272,6 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // ===================================================================
-
-  // ========== PRESENTATION DEMO: Uses actual DDQN model ==========
-  const [demoStep, setDemoStep] = useState(0);
-  const [demoBaseSchedule, setDemoBaseSchedule] = useState(null);
-
-  const DEMO_TASKS = (() => {
-    const td = getNow().toISOString().split("T")[0];
-    return [
-      { id: "demo-1", title: "KODING ML PROJECT", task_type: "analytical", duration: 2, priority: 5, cognitive_demand: 5, deadline: "22:00", deadline_date: td, category: "analytical" },
-      { id: "demo-2", title: "TUGAS KALKULUS", task_type: "analytical", duration: 1.5, priority: 4, cognitive_demand: 4, deadline: "22:00", deadline_date: td, category: "analytical" },
-      { id: "demo-3", title: "BACA PAPER AI", task_type: "analytical", duration: 1, priority: 3, cognitive_demand: 4, deadline: "22:00", deadline_date: td, category: "analytical" },
-      { id: "demo-4", title: "REVIEW CATATAN", task_type: "routine", duration: 1, priority: 2, cognitive_demand: 2, deadline: "22:00", deadline_date: td, category: "routine" },
-      { id: "demo-5", title: "ORGANIZE FILES", task_type: "routine", duration: 0.5, priority: 1, cognitive_demand: 1, deadline: "22:00", deadline_date: td, category: "routine" },
-      { id: "demo-6", title: "DESAIN UI", task_type: "creative", duration: 1.5, priority: 3, cognitive_demand: 3, deadline: "22:00", deadline_date: td, category: "creative" },
-    ];
-  })();
-
-  // ① Load demo tasks + clear history
-  const demoStep1_LoadTasks = () => {
-    setHistoryRecords([]); db.data.historyRecords = []; db.save();
-    setTasks(DEMO_TASKS);
-    setSchedule([]); setDemoBaseSchedule(null);
-    setDemoStep(1);
-    setToastMsg("📋 Step 1 done! Sekarang klik 'AI Schedule' untuk generate TANPA RL →");
-  };
-
-  // ② Save "before" + inject history
-  const demoStep2_SaveAndInject = () => {
-    // Save current schedule as "before"
-    setDemoBaseSchedule([...schedule]);
-    const yd = new Date(getNow().getTime()); yd.setDate(yd.getDate() - 1);
-    db.setScheduleByDate(yd.toISOString().split("T")[0], [...schedule]);
-
-    // Inject 5 days of history
-    const fakeHistory = [];
-    for (let day = 0; day < 5; day++) {
-      const d = new Date(getNow().getTime()); d.setDate(d.getDate() - (day + 2));
-      const date = d.toISOString().split("T")[0];
-      // Morning (05:00-12:00): SUCCESS
-      [10, 12, 14, 16, 18, 20].forEach(slot => {
-        fakeHistory.push({ task_type: "analytical", duration_hours: 1, completed_on_time: 1, was_abandoned: 0, vibe_before: 0.7, vibe_after: 0.8, scheduled_slot: slot, date, day, actual_duration_hours: 0.9, is_buffer: false, user_accepted_buffer: null, task_id: `h-${day}-m${slot}` });
-      });
-      // Afternoon (14:00-18:00): ABANDONED
-      [28, 30, 32, 34, 36].forEach(slot => {
-        fakeHistory.push({ task_type: "analytical", duration_hours: 1, completed_on_time: 0, was_abandoned: 1, vibe_before: 0.3, vibe_after: 0.15, scheduled_slot: slot, date, day, actual_duration_hours: 0.2, is_buffer: false, user_accepted_buffer: null, task_id: `h-${day}-a${slot}` });
-      });
-    }
-    setHistoryRecords(fakeHistory);
-    setDemoStep(2); setWeekViewKey(k => k + 1);
-    setToastMsg(`📊 Step 2 done! ${fakeHistory.length} RL history loaded. Klik 'AI Schedule' lagi →`);
-  };
-
-  // Called at end of doGenerate to auto-advance demo
-  const demoAfterGenerate = (generatedSchedule) => {
-    if (demoStep === 1) {
-      // Just generated WITHOUT RL — save as baseline
-      setDemoBaseSchedule([...generatedSchedule]);
-      setToastMsg("✅ Jadwal TANPA RL tersimpan! Klik ② untuk inject history →");
-    } else if (demoStep === 2) {
-      // Just generated WITH RL — show comparison
-      setDemoStep(3);
-      setToastMsg("✅ Jadwal DENGAN RL selesai! Lihat perbandingan di panel →");
-    }
-  };
-
-  const demoReset = () => {
-    setDemoStep(0); setDemoBaseSchedule(null); setHistoryRecords([]);
-    setSchedule([]); setTasks([]); setBufferPool([]);
-    db.data.historyRecords = []; db.data.bufferPool = [];
-    const today = getNow();
-    for (let i = 1; i <= 7; i++) { const d = new Date(today.getTime()); d.setDate(d.getDate() - i); db.setScheduleByDate(d.toISOString().split("T")[0], []); }
-    db.save(); setWeekViewKey(k => k + 1);
-    setToastMsg("🔄 Demo reset — semua data dihapus");
-  };
-
-  // ========== UNIFIED DEMO: RL + Buffer System ==========
-  const loadBufferDemo = () => {
-    const today = getNow().toISOString().split("T")[0];
-    const d1 = new Date(getNow().getTime()); d1.setDate(d1.getDate() + 1);
-    const tmrStr = d1.toISOString().split("T")[0];
-    const d2 = new Date(getNow().getTime()); d2.setDate(d2.getDate() + 2);
-    const d2Str = d2.toISOString().split("T")[0];
-    const d3 = new Date(getNow().getTime()); d3.setDate(d3.getDate() + 3);
-    const d3Str = d3.toISOString().split("T")[0];
-    const d5 = new Date(getNow().getTime()); d5.setDate(d5.getDate() + 5);
-    const d5Str = d5.toISOString().split("T")[0];
-
-    // ── Active tasks (deadline TODAY) ───────────────────
-    const todayTasks = [
-      { id: "td-1", title: "KODING TUGAS WEB", task_type: "analytical", duration: 1.5, priority: 4, cognitive_demand: 4, deadline: "22:00", deadline_date: today, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
-      { id: "td-2", title: "REVIEW CATATAN PBO", task_type: "routine", duration: 1, priority: 3, cognitive_demand: 2, deadline: "17:00", deadline_date: today, category: "routine", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
-      { id: "td-3", title: "BUAT SLIDE PRESENTASI", task_type: "creative", duration: 1, priority: 3, cognitive_demand: 3, deadline: "20:00", deadline_date: today, category: "creative", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
-    ];
-
-    // ── Buffer tasks (deadline FUTURE) ──────────────────
-    const bufferTasks = [
-      // URGENT: deadline besok → AKAN muncul di buffer prompt
-      { id: "bf-1", title: "TUGAS KALKULUS BAB 5", task_type: "analytical", duration: 2, priority: 5, cognitive_demand: 5, deadline: "23:59", deadline_date: tmrStr, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
-      { id: "bf-2", title: "QUIZ PREP STATISTIKA", task_type: "analytical", duration: 1.5, priority: 4, cognitive_demand: 4, deadline: "10:00", deadline_date: tmrStr, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
-      // NON-URGENT: deadline lusa+ → TIDAK muncul di prompt
-      { id: "bf-3", title: "LAPORAN PRAKTIKUM", task_type: "analytical", duration: 2.5, priority: 4, cognitive_demand: 4, deadline: "17:00", deadline_date: d2Str, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
-      { id: "bf-4", title: "ESSAY FILSAFAT", task_type: "creative", duration: 2, priority: 3, cognitive_demand: 3, deadline: "23:59", deadline_date: d3Str, category: "creative", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
-      { id: "bf-5", title: "BACA PAPER AI ETHICS", task_type: "analytical", duration: 1, priority: 2, cognitive_demand: 3, deadline: "23:59", deadline_date: d5Str, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.3 },
-    ];
-
-    // ── RL History: 5 hari (pola pagi sukses, siang abandon) ──
-    const fakeHistory = [];
-    for (let day = 0; day < 5; day++) {
-      const hd = new Date(getNow().getTime()); hd.setDate(hd.getDate() - (day + 1));
-      const date = hd.toISOString().split("T")[0];
-
-      // Pagi (05:00-12:00) slot 10-24: analytical SUKSES
-      [10, 12, 14, 16, 18, 20, 22, 24].forEach(slot => {
-        fakeHistory.push({
-          task_type: "analytical", duration_hours: 1, completed_on_time: 1, was_abandoned: 0,
-          vibe_before: 0.7, vibe_after: 0.85, scheduled_slot: slot, date, day,
-          actual_duration_hours: 0.95, is_buffer: false, user_accepted_buffer: null,
-          task_id: `rl-${day}-m${slot}`
-        });
-      });
-      // Pagi: routine SUKSES
-      [11, 13].forEach(slot => {
-        fakeHistory.push({
-          task_type: "routine", duration_hours: 0.5, completed_on_time: 1, was_abandoned: 0,
-          vibe_before: 0.6, vibe_after: 0.7, scheduled_slot: slot, date, day,
-          actual_duration_hours: 0.5, is_buffer: false, user_accepted_buffer: null,
-          task_id: `rl-${day}-r${slot}`
-        });
-      });
-
-      // Siang (14:00-18:00) slot 28-36: analytical ABANDON
-      [28, 30, 32, 34, 36].forEach(slot => {
-        fakeHistory.push({
-          task_type: "analytical", duration_hours: 1, completed_on_time: 0, was_abandoned: 1,
-          vibe_before: 0.3, vibe_after: 0.15, scheduled_slot: slot, date, day,
-          actual_duration_hours: 0.2, is_buffer: false, user_accepted_buffer: null,
-          task_id: `rl-${day}-a${slot}`
-        });
-      });
-
-      // Buffer history: 2 dari 3 buffer tasks diterima
-      if (day < 3) {
-        fakeHistory.push({
-          task_type: "analytical", duration_hours: 1.5, completed_on_time: 1, was_abandoned: 0,
-          vibe_before: 0.6, vibe_after: 0.7, scheduled_slot: 14, date, day,
-          actual_duration_hours: 1.4, is_buffer: true, user_accepted_buffer: true,
-          task_id: `rl-${day}-buf-acc`
-        });
-        fakeHistory.push({
-          task_type: "analytical", duration_hours: 1, completed_on_time: null, was_abandoned: 0,
-          vibe_before: 0.5, vibe_after: 0.5, scheduled_slot: null, date, day,
-          actual_duration_hours: 0, is_buffer: true, user_accepted_buffer: false,
-          task_id: `rl-${day}-buf-dec`
-        });
-      }
-    }
-
-    setTasks(todayTasks);
-    setBufferPool(bufferTasks);
-    setHistoryRecords(fakeHistory);
-    setSchedule([]);
-    setWeekViewKey(k => k + 1);
-
-    console.log("═══════════════════════════════════════════════");
-    console.log("[UNIFIED DEMO] Data loaded:");
-    console.log("═══════════════════════════════════════════════");
-    console.log(`📋 Active Tasks (${todayTasks.length}):`);
-    todayTasks.forEach(t => console.log(`   • ${t.title} [${t.task_type}] deadline ${t.deadline}`));
-    console.log(`📦 Buffer Pool (${bufferTasks.length}):`);
-    bufferTasks.forEach(t => {
-      const dLeft = Math.ceil((new Date(t.deadline_date) - new Date(today)) / 86400000);
-      console.log(`   • ${t.title} [${t.task_type}] deadline ${t.deadline_date} (${dLeft}d)${dLeft <= 1 ? " ⚠️ URGENT" : ""}`);
-    });
-    console.log(`📊 RL History: ${fakeHistory.length} records (5 hari)`);
-    console.log(`   Pattern: pagi(05-12)=SUKSES, siang(14-18)=ABANDON`);
-    console.log(`   Buffer accept rate: 66% (2/3 per day)`);
-    console.log("═══════════════════════════════════════════════");
-    console.log("TEST CASES:");
-    console.log("  1. Klik 'AI Schedule' → buffer prompt untuk 2 task besok");
-    console.log("  2. Accept salah satu, skip lainnya → generate");
-    console.log("  3. Cek jadwal: analytical harus di pagi (RL effect)");
-    console.log("  4. Abandon task → cek kembali ke buffer");
-    console.log("  5. Banding RL Demo (Schedule view) before/after");
-    console.log("═══════════════════════════════════════════════");
-    setToastMsg(`✅ Demo loaded! ${todayTasks.length} active + ${bufferTasks.length} buffer + ${fakeHistory.length} RL records. Klik AI Schedule →`);
-  };
-  // ========================================================================
 
   const showToast = useCallback((msg) => setToastMsg(msg), []);
 
@@ -991,7 +790,6 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
 
   // ========== BUFFER CHECK: intercept before doGenerate ==========
   const handleAISchedule = () => {
-    const today = getNow().toISOString().split("T")[0];
     const tomorrow = new Date(getNow().getTime());
     tomorrow.setDate(tomorrow.getDate() + 1);
     const tomorrowStr = tomorrow.toISOString().split("T")[0];
@@ -1013,7 +811,6 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
 
   const handleBufferConfirm = () => {
     const accepted = bufferPromptTasks.filter(t => t._accepted === true);
-    const declined = bufferPromptTasks.filter(t => t._accepted === false || t._accepted === null);
 
     // Move accepted tasks to active
     if (accepted.length > 0) {
@@ -1049,7 +846,6 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
       // Use actual current time
       const nowDate = getNow();
       const nowHour = nowDate.getHours() + nowDate.getMinutes() / 60;
-      const endOfDayHour = 23.99;
       
       // If generating late at night (after 21:00), schedule for tomorrow morning
       const WAKE_HOURS = { morning: 5, intermediate: 7, evening: 9 };
@@ -1242,10 +1038,7 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
       db.setFixedEventsByDate(todayStr, fixedBlocks);
       db.updateUser({ lastActiveDate: todayStr });
 
-      // Demo mode: auto-advance after DDQN model generates
-      if (demoStep >= 1) {
-        demoAfterGenerate(sched);
-      }
+
 
       if (sched.length > 0) {
         showToast(`AI Schedule Generated! (${sched.length} tasks, RL history: ${historyRecords.length} records)`);
@@ -1289,7 +1082,6 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
 
   const activeTasks = getOrderedActiveTasks();
   const archivedTasks = tasks.filter((t) => t.is_archived);
-  const runningTask = tasks.find((t) => t.is_running);
   const getElapsed = (t) =>
     !t.is_running || !t.last_started_at
       ? t.total_duration
@@ -1304,8 +1096,6 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
     () => getRLSummary(historyRecords),
     [historyRecords]
   );
-  const maxEnergy = Math.max(...energyProfile);
-  const nowSlot = getNow().getHours() * 2 + (getNow().getMinutes() >= 30 ? 1 : 0);
 
   const S = {
     app: { display: "flex", height: "100vh", background: "#09090b", color: "#e4e4e7", overflow: "hidden", fontSize: 13 },
@@ -1389,8 +1179,6 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
                 <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={handleAISchedule} disabled={scheduleLoading}>
                   {scheduleLoading ? "⏳ Scheduling..." : "◈ AI Schedule"}
                 </button>
-                <button style={{ ...S.btn, color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)", fontSize: 10 }} onClick={loadBufferDemo}>📦 Buffer Demo</button>
-                <button style={{ ...S.btn, color: "#ef4444", fontSize: 10 }} onClick={demoReset}>✕ Reset</button>
               </>
             )}
             {view === "schedule" && (
@@ -1398,24 +1186,6 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
                 <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={handleAISchedule} disabled={scheduleLoading}>
                   {scheduleLoading ? "⏳ Generating..." : "↻ AI Schedule"}
                 </button>
-                <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: 8, padding: "4px 8px", borderRadius: 6, background: "rgba(129,140,248,0.08)", border: "1px solid rgba(129,140,248,0.2)" }}>
-                  <span style={{ fontSize: 9, color: "#818cf8", fontWeight: 700 }}>RL DEMO:</span>
-                  <button
-                    style={{ ...S.btn, color: demoStep >= 1 ? "#52525b" : "#34d399", borderColor: demoStep >= 1 ? "rgba(82,82,91,0.3)" : "rgba(52,211,153,0.4)", fontSize: 10, padding: "4px 8px" }}
-                    onClick={demoStep1_LoadTasks}
-                  >①Muat Task</button>
-                  <button
-                    style={{ ...S.btn, color: demoStep < 1 || !schedule.length ? "#3f3f46" : demoStep >= 2 ? "#52525b" : "#f59e0b", borderColor: demoStep < 1 || !schedule.length ? "rgba(63,63,70,0.3)" : "rgba(245,158,11,0.4)", fontSize: 10, padding: "4px 8px" }}
-                    onClick={demoStep2_SaveAndInject}
-                    disabled={demoStep < 1 || !schedule.length}
-                  >②Inject History</button>
-                  {demoStep > 0 && (
-                    <span style={{ fontSize: 9, color: demoStep === 3 ? "#22c55e" : "#a1a1aa" }}>
-                      {demoStep === 1 ? "→ Klik AI Schedule" : demoStep === 2 ? "→ Klik AI Schedule lagi" : "✅ Bandingkan!"}
-                    </span>
-                  )}
-                  {demoStep > 0 && <button style={{ ...S.btn, color: "#ef4444", fontSize: 10, padding: "4px 6px" }} onClick={demoReset}>✕</button>}
-                </div>
               </>
             )}
           </div>
@@ -1692,55 +1462,7 @@ Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
                  </div>
                </div>
 
-               {/* RL Demo Comparison Panel — only shown during demo */}
-               {demoStep >= 1 && (
-                 <div style={{ display: "flex", gap: 12, padding: "12px 16px", background: "rgba(129,140,248,0.04)", border: "1px solid rgba(129,140,248,0.15)", borderRadius: 8 }}>
-                   {/* Before RL */}
-                   <div style={{ flex: 1 }}>
-                     <div style={{ fontSize: 10, fontWeight: 700, color: "#f59e0b", marginBottom: 6 }}>📋 SEBELUM RL (Step 1)</div>
-                     {demoBaseSchedule ? demoBaseSchedule.map((t, i) => {
-                       const c = BLOCK_COLORS[t.task_type] || BLOCK_COLORS.routine;
-                       return (
-                         <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", padding: "3px 6px", marginBottom: 2, borderRadius: 4, background: c.bg, fontSize: 10 }}>
-                           <span style={{ color: "#a1a1aa", fontWeight: 600, width: 40 }}>{slotToTime(t.scheduled_start)}</span>
-                           <span style={{ color: c.text, fontWeight: 600 }}>{t.title}</span>
-                           <span style={{ color: "#71717a", fontSize: 8 }}>({t.task_type})</span>
-                         </div>
-                       );
-                     }) : <div style={{ fontSize: 10, color: "#52525b" }}>Belum di-generate</div>}
-                   </div>
 
-                   {/* Arrow */}
-                   <div style={{ display: "flex", alignItems: "center", padding: "0 8px" }}>
-                     <div style={{ fontSize: 18, color: demoStep >= 3 ? "#22c55e" : "#3f3f46" }}>{demoStep >= 3 ? "→" : "⋯"}</div>
-                   </div>
-
-                   {/* After RL */}
-                   <div style={{ flex: 1 }}>
-                     <div style={{ fontSize: 10, fontWeight: 700, color: demoStep >= 3 ? "#22c55e" : "#3f3f46", marginBottom: 6 }}>✅ SESUDAH RL (Step 3)</div>
-                     {demoStep >= 3 ? schedule.map((t, i) => {
-                       const c = BLOCK_COLORS[t.task_type] || BLOCK_COLORS.routine;
-                       const beforeTask = demoBaseSchedule?.find(b => b.id === t.id);
-                       const moved = beforeTask && beforeTask.scheduled_start !== t.scheduled_start;
-                       return (
-                         <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", padding: "3px 6px", marginBottom: 2, borderRadius: 4, background: moved ? "rgba(34,197,94,0.15)" : c.bg, fontSize: 10, border: moved ? "1px solid rgba(34,197,94,0.3)" : "none" }}>
-                           <span style={{ color: "#a1a1aa", fontWeight: 600, width: 40 }}>{slotToTime(t.scheduled_start)}</span>
-                           <span style={{ color: c.text, fontWeight: 600 }}>{t.title}</span>
-                           {moved && <span style={{ color: "#22c55e", fontSize: 8, fontWeight: 700 }}>↑ PINDAH dari {slotToTime(beforeTask.scheduled_start)}</span>}
-                         </div>
-                       );
-                     }) : <div style={{ fontSize: 10, color: "#52525b" }}>{demoStep <= 2 ? "Klik 'AI Schedule' setelah inject history" : "Loading..."}</div>}
-                   </div>
-
-                   {/* Step explanation */}
-                   <div style={{ flex: 1, borderLeft: "1px solid rgba(255,255,255,0.06)", paddingLeft: 12, fontSize: 10, color: "#a1a1aa", lineHeight: 1.6 }}>
-                     <div style={{ fontWeight: 700, color: "#818cf8", marginBottom: 4 }}>💡 Penjelasan</div>
-                     {demoStep === 1 && <div>Tasks dimuat. Klik <span style={{ color: "#34d399" }}>'AI Schedule'</span> untuk generate jadwal dari <span style={{ color: "#f59e0b" }}>DDQN model TANPA RL history</span>.</div>}
-                     {demoStep === 2 && <div><span style={{ color: "#f59e0b" }}>{historyRecords.length} record</span> history di-inject. RL belajar: <span style={{ color: "#22c55e" }}>pagi produktif</span>, <span style={{ color: "#ef4444" }}>siang abandon</span>. Klik <span style={{ color: "#34d399" }}>'AI Schedule'</span> lagi!</div>}
-                     {demoStep === 3 && <div>DDQN model menghasilkan jadwal <span style={{ color: "#22c55e" }}>berbeda</span> karena menerima <span style={{ color: "#22c55e" }}>user_history_records</span> yang mengubah state vector model.</div>}
-                   </div>
-                 </div>
-               )}
 
                {/* Week view: Shows last 6 days + today (7 days total with history) */}
                <div key={`week-${weekViewKey}`} style={{ flex: 1, display: "flex", gap: 1, overflowX: "auto", overflowY: "auto", background: "rgba(255,255,255,0.01)", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", padding: 12 }}>
