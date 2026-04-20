@@ -6,6 +6,9 @@ import {
   ENERGY_LABELS,
   BLOCK_COLORS,
   buildEnergyProfile,
+  buildRLEnergyProfile,
+  getRLSummary,
+  localRLScheduler,
   fmt,
   slotToTime,
   deadlineToHour,
@@ -13,6 +16,17 @@ import {
   cogDemandStrToFloat,
 } from "./utils";
 import { db } from "./db";
+
+// ========== DEBUG: Set to a static time for testing ==========
+// Set to null to use real time, or set a Date for a fixed debug time
+const DEBUG_TIME = (() => {
+  const d = new Date();
+  d.setHours(5, 0, 0, 0); // 5:00 AM
+  return d;
+})();
+
+const getNow = () => (DEBUG_TIME ? new Date(DEBUG_TIME.getTime()) : new Date());
+// =============================================================
 
 const PriorityDots = ({ level }) => (
   <span style={{ display: "inline-flex", gap: 2 }}>
@@ -26,7 +40,7 @@ const PriorityDots = ({ level }) => (
 );
 
 const DailyTimeline = ({ schedule, fixedBlocks, energyProfile }) => {
-  const now = new Date();
+  const now = getNow();
   const nowSlot = now.getHours() * 2 + Math.floor(now.getMinutes() / 30);
   const maxEnergy = Math.max(...energyProfile, 1);
   const SLOT_HEIGHT = 40; // Fixed height per 30-min slot in pixels
@@ -174,6 +188,7 @@ export default function App() {
   const [bufferPool, setBufferPool] = useState(() => db.getBufferPool());
   const [showAddTask, setShowAddTask] = useState(false);
   const [, setTick] = useState(0);
+  const [weekViewKey, setWeekViewKey] = useState(0); // Force re-render week view
   const [form, setForm] = useState({
     title: "",
     category: "analytical",
@@ -181,6 +196,7 @@ export default function App() {
     priority: 3,
     cognitive_demand: 3,
     deadline: "",
+    deadline_date: "", // YYYY-MM-DD format
     is_fixed: false,
     startTime: "08:00",
     endTime: "10:00",
@@ -204,14 +220,23 @@ export default function App() {
     priority: 3,
     cognitive_demand: 3,
     deadline: "",
+    deadline_date: "",
     startTime: "08:00",
     endTime: "10:00",
   });
+
+  // Buffer prompt state
+  const [bufferPromptTasks, setBufferPromptTasks] = useState([]);
+  const [showBufferPrompt, setShowBufferPrompt] = useState(false);
 
   useEffect(() => {
     db.setActiveTasks(tasks);
     db.setFixedEvents(fixedBlocks);
     db.setScheduleForDay(userState.current_day, schedule);
+    // RL: Also persist schedule by date for week view history
+    const todayStr = getNow().toISOString().split('T')[0];
+    db.setScheduleByDate(todayStr, schedule);
+    db.setFixedEventsByDate(todayStr, fixedBlocks);
   }, [tasks, fixedBlocks, schedule, userState.current_day]);
 
   useEffect(() => {
@@ -236,6 +261,219 @@ export default function App() {
     }
   }, [toastMsg]);
 
+  // ========== RL: Auto-detect day change and trigger rollover ==========
+  useEffect(() => {
+    const todayStr = getNow().toISOString().split('T')[0];
+    const lastDate = db.getUser().lastActiveDate;
+
+    if (lastDate && lastDate !== todayStr) {
+      // Day has changed — save yesterday's final state, then roll over
+      db.setScheduleByDate(lastDate, schedule);
+      db.setFixedEventsByDate(lastDate, fixedBlocks);
+
+      const newDay = db.advanceDay(todayStr);
+      console.log(`[RL] Day changed: ${lastDate} → ${todayStr} (episode day ${newDay})`);
+
+      // Reload state from db after rollover
+      setUserState(db.getUser());
+      setTasks(db.getActiveTasks());
+      setBufferPool(db.getBufferPool());
+      setSchedule([]); // Fresh day, empty schedule
+    } else if (!lastDate) {
+      // First time — just set today's date
+      db.updateUser({ lastActiveDate: todayStr });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // ===================================================================
+
+  // ========== PRESENTATION DEMO: Uses actual DDQN model ==========
+  const [demoStep, setDemoStep] = useState(0);
+  const [demoBaseSchedule, setDemoBaseSchedule] = useState(null);
+
+  const DEMO_TASKS = (() => {
+    const td = getNow().toISOString().split("T")[0];
+    return [
+      { id: "demo-1", title: "KODING ML PROJECT", task_type: "analytical", duration: 2, priority: 5, cognitive_demand: 5, deadline: "22:00", deadline_date: td, category: "analytical" },
+      { id: "demo-2", title: "TUGAS KALKULUS", task_type: "analytical", duration: 1.5, priority: 4, cognitive_demand: 4, deadline: "22:00", deadline_date: td, category: "analytical" },
+      { id: "demo-3", title: "BACA PAPER AI", task_type: "analytical", duration: 1, priority: 3, cognitive_demand: 4, deadline: "22:00", deadline_date: td, category: "analytical" },
+      { id: "demo-4", title: "REVIEW CATATAN", task_type: "routine", duration: 1, priority: 2, cognitive_demand: 2, deadline: "22:00", deadline_date: td, category: "routine" },
+      { id: "demo-5", title: "ORGANIZE FILES", task_type: "routine", duration: 0.5, priority: 1, cognitive_demand: 1, deadline: "22:00", deadline_date: td, category: "routine" },
+      { id: "demo-6", title: "DESAIN UI", task_type: "creative", duration: 1.5, priority: 3, cognitive_demand: 3, deadline: "22:00", deadline_date: td, category: "creative" },
+    ];
+  })();
+
+  // ① Load demo tasks + clear history
+  const demoStep1_LoadTasks = () => {
+    setHistoryRecords([]); db.data.historyRecords = []; db.save();
+    setTasks(DEMO_TASKS);
+    setSchedule([]); setDemoBaseSchedule(null);
+    setDemoStep(1);
+    setToastMsg("📋 Step 1 done! Sekarang klik 'AI Schedule' untuk generate TANPA RL →");
+  };
+
+  // ② Save "before" + inject history
+  const demoStep2_SaveAndInject = () => {
+    // Save current schedule as "before"
+    setDemoBaseSchedule([...schedule]);
+    const yd = new Date(getNow().getTime()); yd.setDate(yd.getDate() - 1);
+    db.setScheduleByDate(yd.toISOString().split("T")[0], [...schedule]);
+
+    // Inject 5 days of history
+    const fakeHistory = [];
+    for (let day = 0; day < 5; day++) {
+      const d = new Date(getNow().getTime()); d.setDate(d.getDate() - (day + 2));
+      const date = d.toISOString().split("T")[0];
+      // Morning (05:00-12:00): SUCCESS
+      [10, 12, 14, 16, 18, 20].forEach(slot => {
+        fakeHistory.push({ task_type: "analytical", duration_hours: 1, completed_on_time: 1, was_abandoned: 0, vibe_before: 0.7, vibe_after: 0.8, scheduled_slot: slot, date, day, actual_duration_hours: 0.9, is_buffer: false, user_accepted_buffer: null, task_id: `h-${day}-m${slot}` });
+      });
+      // Afternoon (14:00-18:00): ABANDONED
+      [28, 30, 32, 34, 36].forEach(slot => {
+        fakeHistory.push({ task_type: "analytical", duration_hours: 1, completed_on_time: 0, was_abandoned: 1, vibe_before: 0.3, vibe_after: 0.15, scheduled_slot: slot, date, day, actual_duration_hours: 0.2, is_buffer: false, user_accepted_buffer: null, task_id: `h-${day}-a${slot}` });
+      });
+    }
+    setHistoryRecords(fakeHistory);
+    setDemoStep(2); setWeekViewKey(k => k + 1);
+    setToastMsg(`📊 Step 2 done! ${fakeHistory.length} RL history loaded. Klik 'AI Schedule' lagi →`);
+  };
+
+  // Called at end of doGenerate to auto-advance demo
+  const demoAfterGenerate = (generatedSchedule) => {
+    if (demoStep === 1) {
+      // Just generated WITHOUT RL — save as baseline
+      setDemoBaseSchedule([...generatedSchedule]);
+      setToastMsg("✅ Jadwal TANPA RL tersimpan! Klik ② untuk inject history →");
+    } else if (demoStep === 2) {
+      // Just generated WITH RL — show comparison
+      setDemoStep(3);
+      setToastMsg("✅ Jadwal DENGAN RL selesai! Lihat perbandingan di panel →");
+    }
+  };
+
+  const demoReset = () => {
+    setDemoStep(0); setDemoBaseSchedule(null); setHistoryRecords([]);
+    setSchedule([]); setTasks([]); setBufferPool([]);
+    db.data.historyRecords = []; db.data.bufferPool = [];
+    const today = getNow();
+    for (let i = 1; i <= 7; i++) { const d = new Date(today.getTime()); d.setDate(d.getDate() - i); db.setScheduleByDate(d.toISOString().split("T")[0], []); }
+    db.save(); setWeekViewKey(k => k + 1);
+    setToastMsg("🔄 Demo reset — semua data dihapus");
+  };
+
+  // ========== UNIFIED DEMO: RL + Buffer System ==========
+  const loadBufferDemo = () => {
+    const today = getNow().toISOString().split("T")[0];
+    const d1 = new Date(getNow().getTime()); d1.setDate(d1.getDate() + 1);
+    const tmrStr = d1.toISOString().split("T")[0];
+    const d2 = new Date(getNow().getTime()); d2.setDate(d2.getDate() + 2);
+    const d2Str = d2.toISOString().split("T")[0];
+    const d3 = new Date(getNow().getTime()); d3.setDate(d3.getDate() + 3);
+    const d3Str = d3.toISOString().split("T")[0];
+    const d5 = new Date(getNow().getTime()); d5.setDate(d5.getDate() + 5);
+    const d5Str = d5.toISOString().split("T")[0];
+
+    // ── Active tasks (deadline TODAY) ───────────────────
+    const todayTasks = [
+      { id: "td-1", title: "KODING TUGAS WEB", task_type: "analytical", duration: 1.5, priority: 4, cognitive_demand: 4, deadline: "22:00", deadline_date: today, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
+      { id: "td-2", title: "REVIEW CATATAN PBO", task_type: "routine", duration: 1, priority: 3, cognitive_demand: 2, deadline: "17:00", deadline_date: today, category: "routine", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
+      { id: "td-3", title: "BUAT SLIDE PRESENTASI", task_type: "creative", duration: 1, priority: 3, cognitive_demand: 3, deadline: "20:00", deadline_date: today, category: "creative", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
+    ];
+
+    // ── Buffer tasks (deadline FUTURE) ──────────────────
+    const bufferTasks = [
+      // URGENT: deadline besok → AKAN muncul di buffer prompt
+      { id: "bf-1", title: "TUGAS KALKULUS BAB 5", task_type: "analytical", duration: 2, priority: 5, cognitive_demand: 5, deadline: "23:59", deadline_date: tmrStr, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
+      { id: "bf-2", title: "QUIZ PREP STATISTIKA", task_type: "analytical", duration: 1.5, priority: 4, cognitive_demand: 4, deadline: "10:00", deadline_date: tmrStr, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
+      // NON-URGENT: deadline lusa+ → TIDAK muncul di prompt
+      { id: "bf-3", title: "LAPORAN PRAKTIKUM", task_type: "analytical", duration: 2.5, priority: 4, cognitive_demand: 4, deadline: "17:00", deadline_date: d2Str, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
+      { id: "bf-4", title: "ESSAY FILSAFAT", task_type: "creative", duration: 2, priority: 3, cognitive_demand: 3, deadline: "23:59", deadline_date: d3Str, category: "creative", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.0 },
+      { id: "bf-5", title: "BACA PAPER AI ETHICS", task_type: "analytical", duration: 1, priority: 2, cognitive_demand: 3, deadline: "23:59", deadline_date: d5Str, category: "analytical", is_running: false, total_duration: 0, last_started_at: null, is_archived: false, is_fixed: false, partial_done: 0.3 },
+    ];
+
+    // ── RL History: 5 hari (pola pagi sukses, siang abandon) ──
+    const fakeHistory = [];
+    for (let day = 0; day < 5; day++) {
+      const hd = new Date(getNow().getTime()); hd.setDate(hd.getDate() - (day + 1));
+      const date = hd.toISOString().split("T")[0];
+
+      // Pagi (05:00-12:00) slot 10-24: analytical SUKSES
+      [10, 12, 14, 16, 18, 20, 22, 24].forEach(slot => {
+        fakeHistory.push({
+          task_type: "analytical", duration_hours: 1, completed_on_time: 1, was_abandoned: 0,
+          vibe_before: 0.7, vibe_after: 0.85, scheduled_slot: slot, date, day,
+          actual_duration_hours: 0.95, is_buffer: false, user_accepted_buffer: null,
+          task_id: `rl-${day}-m${slot}`
+        });
+      });
+      // Pagi: routine SUKSES
+      [11, 13].forEach(slot => {
+        fakeHistory.push({
+          task_type: "routine", duration_hours: 0.5, completed_on_time: 1, was_abandoned: 0,
+          vibe_before: 0.6, vibe_after: 0.7, scheduled_slot: slot, date, day,
+          actual_duration_hours: 0.5, is_buffer: false, user_accepted_buffer: null,
+          task_id: `rl-${day}-r${slot}`
+        });
+      });
+
+      // Siang (14:00-18:00) slot 28-36: analytical ABANDON
+      [28, 30, 32, 34, 36].forEach(slot => {
+        fakeHistory.push({
+          task_type: "analytical", duration_hours: 1, completed_on_time: 0, was_abandoned: 1,
+          vibe_before: 0.3, vibe_after: 0.15, scheduled_slot: slot, date, day,
+          actual_duration_hours: 0.2, is_buffer: false, user_accepted_buffer: null,
+          task_id: `rl-${day}-a${slot}`
+        });
+      });
+
+      // Buffer history: 2 dari 3 buffer tasks diterima
+      if (day < 3) {
+        fakeHistory.push({
+          task_type: "analytical", duration_hours: 1.5, completed_on_time: 1, was_abandoned: 0,
+          vibe_before: 0.6, vibe_after: 0.7, scheduled_slot: 14, date, day,
+          actual_duration_hours: 1.4, is_buffer: true, user_accepted_buffer: true,
+          task_id: `rl-${day}-buf-acc`
+        });
+        fakeHistory.push({
+          task_type: "analytical", duration_hours: 1, completed_on_time: null, was_abandoned: 0,
+          vibe_before: 0.5, vibe_after: 0.5, scheduled_slot: null, date, day,
+          actual_duration_hours: 0, is_buffer: true, user_accepted_buffer: false,
+          task_id: `rl-${day}-buf-dec`
+        });
+      }
+    }
+
+    setTasks(todayTasks);
+    setBufferPool(bufferTasks);
+    setHistoryRecords(fakeHistory);
+    setSchedule([]);
+    setWeekViewKey(k => k + 1);
+
+    console.log("═══════════════════════════════════════════════");
+    console.log("[UNIFIED DEMO] Data loaded:");
+    console.log("═══════════════════════════════════════════════");
+    console.log(`📋 Active Tasks (${todayTasks.length}):`);
+    todayTasks.forEach(t => console.log(`   • ${t.title} [${t.task_type}] deadline ${t.deadline}`));
+    console.log(`📦 Buffer Pool (${bufferTasks.length}):`);
+    bufferTasks.forEach(t => {
+      const dLeft = Math.ceil((new Date(t.deadline_date) - new Date(today)) / 86400000);
+      console.log(`   • ${t.title} [${t.task_type}] deadline ${t.deadline_date} (${dLeft}d)${dLeft <= 1 ? " ⚠️ URGENT" : ""}`);
+    });
+    console.log(`📊 RL History: ${fakeHistory.length} records (5 hari)`);
+    console.log(`   Pattern: pagi(05-12)=SUKSES, siang(14-18)=ABANDON`);
+    console.log(`   Buffer accept rate: 66% (2/3 per day)`);
+    console.log("═══════════════════════════════════════════════");
+    console.log("TEST CASES:");
+    console.log("  1. Klik 'AI Schedule' → buffer prompt untuk 2 task besok");
+    console.log("  2. Accept salah satu, skip lainnya → generate");
+    console.log("  3. Cek jadwal: analytical harus di pagi (RL effect)");
+    console.log("  4. Abandon task → cek kembali ke buffer");
+    console.log("  5. Banding RL Demo (Schedule view) before/after");
+    console.log("═══════════════════════════════════════════════");
+    setToastMsg(`✅ Demo loaded! ${todayTasks.length} active + ${bufferTasks.length} buffer + ${fakeHistory.length} RL records. Klik AI Schedule →`);
+  };
+  // ========================================================================
+
   const showToast = useCallback((msg) => setToastMsg(msg), []);
 
   const addTask = () => {
@@ -259,22 +497,30 @@ export default function App() {
         },
       ]);
     } else {
-      setTasks((prev) => [
-        {
-          id: crypto.randomUUID(),
-          ...form,
-          title: form.title.toUpperCase(),
-          task_type: form.category,
-          duration: form.duration_estimate / 60, // in hours
-          is_running: false,
-          total_duration: 0,
-          last_started_at: null,
-          is_archived: false,
-          is_fixed: false,
-          partial_done: 0.0,
-        },
-        ...prev,
-      ]);
+      const newTask = {
+        id: crypto.randomUUID(),
+        ...form,
+        title: form.title.toUpperCase(),
+        task_type: form.category,
+        duration: form.duration_estimate / 60,
+        deadline_date: form.deadline_date || "",
+        is_running: false,
+        total_duration: 0,
+        last_started_at: null,
+        is_archived: false,
+        is_fixed: false,
+        partial_done: 0.0,
+      };
+
+      const today = getNow().toISOString().split("T")[0];
+      if (newTask.deadline_date && newTask.deadline_date > today) {
+        // Future deadline → buffer
+        setBufferPool(prev => [newTask, ...prev]);
+        showToast(`📦 "${newTask.title}" masuk buffer (deadline: ${newTask.deadline_date})`);
+      } else {
+        // Today or no deadline → active
+        setTasks(prev => [newTask, ...prev]);
+      }
     }
     setForm({
       title: "",
@@ -283,6 +529,7 @@ export default function App() {
       priority: 3,
       cognitive_demand: 3,
       deadline: "",
+      deadline_date: "",
       is_fixed: false,
       startTime: "08:00",
       endTime: "10:00",
@@ -313,36 +560,40 @@ export default function App() {
     setSchedule((prev) => prev.filter((s) => s.id !== id));
   };
 
-  // Abandon logic => add partial completion, record history
+  // Abandon logic => partial completion, record history, route to buffer if future deadline
   const abandonTask = (id) => {
-    setTasks((prev) =>
-      prev.map((t) => {
-        if (t.id !== id) return t;
-        const newPartial = t.partial_done + 0.5 * (1 - t.partial_done);
-        
-        // Add to history
-        recordHistory(t, true);
-        
-        return {
-          ...t,
-          is_running: false,
-          partial_done: newPartial,
-          // optional: move to back of queue could be achieved implicitly
-          // but we just reset it for DDQN to reschedule
-        };
-      })
-    );
-    setSchedule((prev) => prev.filter((s) => s.id !== id));
-    showToast("Task abandoned & partial progress saved.");
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+
+    const newPartial = task.partial_done + 0.5 * (1 - task.partial_done);
+    recordHistory(task, true);
+
+    const today = getNow().toISOString().split("T")[0];
+
+    if (task.deadline_date && task.deadline_date > today) {
+      // Deadline still in future → move to buffer pool
+      setBufferPool(prev => [...prev, { ...task, partial_done: newPartial, is_running: false, is_buffer: true }]);
+      setTasks(prev => prev.filter(t => t.id !== id));
+      showToast(`📦 "${task.title}" kembali ke buffer (deadline: ${task.deadline_date})`);
+    } else {
+      // Deadline today or no deadline → stay in active, mark partial
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, is_running: false, partial_done: newPartial } : t));
+      showToast("Task abandoned & partial progress saved.");
+    }
+    setSchedule(prev => prev.filter(s => s.id !== id));
   };
 
   const recordHistory = (task, was_abandoned) => {
     const elapsedHrs = (task.total_duration) / 3600; 
     let completed_on_time = 1;
     if (task.deadline) {
-       const nowHour = new Date().getHours() + new Date().getMinutes()/60;
+       const nowHour = getNow().getHours() + getNow().getMinutes()/60;
        if (nowHour > deadlineToHour(task.deadline)) completed_on_time = 0;
     }
+    // Find the scheduled slot for this task (for RL learning)
+    const scheduledTask = schedule.find(s => s.id === task.id);
+    const todayStr = getNow().toISOString().split('T')[0];
+
     const record = {
       task_id: task.id,
       task_type: task.task_type || "analytical",
@@ -352,9 +603,13 @@ export default function App() {
       vibe_before: vibe,
       vibe_after: vibe, // In full flow, we'd prompt for vibe 2
       was_abandoned: was_abandoned ? 1 : 0,
-      is_buffer: false,
+      is_buffer: task.is_buffer || false,
       user_accepted_buffer: null,
-      day: 0
+      day: userState.current_day,
+      // RL-critical fields: slot and date for learning
+      scheduled_slot: scheduledTask ? scheduledTask.scheduled_start : null,
+      date: todayStr,
+      completed_at_hour: getNow().getHours() + getNow().getMinutes() / 60,
     };
     setHistoryRecords(prev => [...prev, record]);
   };
@@ -475,8 +730,8 @@ export default function App() {
         systemInstruction: {
           parts: [
             {
-              text: `Current timestamp (ISO): ${new Date().toISOString()}
-Today's date: ${new Date().toISOString().split('T')[0]}
+              text: `Current timestamp (ISO): ${getNow().toISOString()}
+Today's date: ${getNow().toISOString().split('T')[0]}
 
 You are a task parser for an AI scheduling system. Extract tasks and events from the user's input in Indonesian or English.
 
@@ -509,10 +764,20 @@ Input: "ada kelas pbo jam 1-2"
 → type="fixed", title="KELAS PBO", start="2026-04-15T13:00:00", end="2026-04-15T14:00:00", duration="1h", category="routine", priority=4
 
 Input: "tugas ml deadline jam 5"
-→ type="flexible", title="TUGAS ML", deadline="17:00", category="analytical", priority=3
+→ type="flexible", title="TUGAS ML", deadline="17:00", deadline_date="2026-04-20", category="analytical", priority=3
+
+Input: "tugas kalkulus deadline hari rabu"
+→ type="flexible", title="TUGAS KALKULUS", deadline="23:59", deadline_date="2026-04-22", category="analytical", priority=3
 
 Input: "meeting 10-11 pagi"
-→ type="fixed", title="MEETING", start="2026-04-15T10:00:00", end="2026-04-15T11:00:00", category="routine", priority=4`,
+→ type="fixed", title="MEETING", start="2026-04-15T10:00:00", end="2026-04-15T11:00:00", category="routine", priority=4
+
+IMPORTANT: For deadline_date, compute the actual date from relative mentions:
+- "besok" = tomorrow's date
+- "lusa" = day after tomorrow
+- "hari rabu" = next Wednesday
+- "minggu depan" = next week
+Always use ISO YYYY-MM-DD format. If no date mentioned, use today's date.`,
             },
           ],
         },
@@ -535,6 +800,7 @@ Input: "meeting 10-11 pagi"
                     priority: { type: "INTEGER" },
                     cognitive_demand: { type: "INTEGER" },
                     deadline: { type: "STRING" },
+                    deadline_date: { type: "STRING" },
                     start: { type: "STRING" },
                     end: { type: "STRING" }
                   },
@@ -609,7 +875,7 @@ Input: "meeting 10-11 pagi"
           // If it's just a time (HH:MM or HH:MM:SS), create a date for today with that time
           if (/^\d{2}:\d{2}/.test(str)) {
             const [hours, minutes] = str.split(":").map(Number);
-            const today = new Date();
+            const today = getNow();
             today.setHours(hours || 0, minutes || 0, 0, 0);
             return today;
           }
@@ -644,11 +910,11 @@ Input: "meeting 10-11 pagi"
             const endHour = parseInt(titleMatch[3]);
             const endMin = titleMatch[4] ? parseInt(titleMatch[4]) : 0;
             
-            const startDate = new Date();
+            const startDate = getNow();
             startDate.setHours(startHour, startMin, 0, 0);
             start = startDate.toISOString();
             
-            const endDate = new Date();
+            const endDate = getNow();
             endDate.setHours(endHour, endMin, 0, 0);
             end = endDate.toISOString();
             console.log(`Fallback extracted from title: "${e.title}" → start=${startHour}:${String(startMin).padStart(2,'0')}, end=${endHour}:${String(endMin).padStart(2,'0')}`);
@@ -682,6 +948,7 @@ Input: "meeting 10-11 pagi"
             priority: e.priority,
             cognitive_demand: e.cognitive_demand,
             deadline: e.deadline ? (e.deadline.includes("T") ? e.deadline.split("T")[1].substring(0,5) : String(e.deadline).substring(0,5)) : "23:59",
+            deadline_date: e.deadline_date || getNow().toISOString().split("T")[0],
             is_running: false,
             total_duration: 0,
             last_started_at: null,
@@ -693,7 +960,17 @@ Input: "meeting 10-11 pagi"
       }
 
       if (newFixed.length) setFixedBlocks((prev) => [...prev, ...newFixed]);
-      if (newTasks.length) setTasks((prev) => [...newTasks, ...prev]);
+      
+      // Route tasks: today → active, future → buffer
+      const today = getNow().toISOString().split("T")[0];
+      const todayTasks = newTasks.filter(t => !t.deadline_date || t.deadline_date <= today);
+      const bufferTasks = newTasks.filter(t => t.deadline_date && t.deadline_date > today);
+      
+      if (todayTasks.length) setTasks((prev) => [...todayTasks, ...prev]);
+      if (bufferTasks.length) {
+        setBufferPool(prev => [...bufferTasks, ...prev]);
+        showToast(`📦 ${bufferTasks.length} task masuk buffer (deadline di masa depan)`);
+      }
       
       // Update vibe based on energy forecast
       if (data.energy_forecast && data.energy_forecast.length > 0) {
@@ -712,6 +989,57 @@ Input: "meeting 10-11 pagi"
     setNlLoading(false);
   };
 
+  // ========== BUFFER CHECK: intercept before doGenerate ==========
+  const handleAISchedule = () => {
+    const today = getNow().toISOString().split("T")[0];
+    const tomorrow = new Date(getNow().getTime());
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().split("T")[0];
+
+    // Pull urgent buffer tasks (deadline <= tomorrow)
+    const urgent = bufferPool.filter(t => t.deadline_date && t.deadline_date <= tomorrowStr);
+
+    if (urgent.length > 0) {
+      setBufferPromptTasks(urgent.map(t => ({ ...t, _accepted: null }))); // null = undecided
+      setShowBufferPrompt(true);
+    } else {
+      doGenerate();
+    }
+  };
+
+  const handleBufferDecision = (taskId, accepted) => {
+    setBufferPromptTasks(prev => prev.map(t => t.id === taskId ? { ...t, _accepted: accepted } : t));
+  };
+
+  const handleBufferConfirm = () => {
+    const accepted = bufferPromptTasks.filter(t => t._accepted === true);
+    const declined = bufferPromptTasks.filter(t => t._accepted === false || t._accepted === null);
+
+    // Move accepted tasks to active
+    if (accepted.length > 0) {
+      const cleanTasks = accepted.map(({ _accepted, ...rest }) => ({ ...rest, is_buffer: false }));
+      setTasks(prev => [...cleanTasks, ...prev]);
+    }
+
+    // Remove accepted from buffer, keep declined
+    const acceptedIds = new Set(accepted.map(t => t.id));
+    setBufferPool(prev => prev.filter(t => !acceptedIds.has(t.id)));
+
+    // Track accept rate
+    const totalPrompted = bufferPromptTasks.length;
+    if (totalPrompted > 0) {
+      const rate = accepted.length / totalPrompted;
+      db.updateUser({ buffer_accept_rate: rate });
+    }
+
+    setShowBufferPrompt(false);
+    setBufferPromptTasks([]);
+
+    // Now proceed to generate
+    setTimeout(() => doGenerate(), 100);
+  };
+  // ==============================================================
+
   const doGenerate = async () => {
     // Only schedule flexible tasks. Fixed blocks are handled separately in fixedBlocks array.
     // Ensure no fixed events are included in API calls.
@@ -719,11 +1047,21 @@ Input: "meeting 10-11 pagi"
     setShowDebug(true);
     try {
       // Use actual current time
-      const nowDate = new Date();
+      const nowDate = getNow();
       const nowHour = nowDate.getHours() + nowDate.getMinutes() / 60;
       const endOfDayHour = 23.99;
       
+      // If generating late at night (after 21:00), schedule for tomorrow morning
+      const WAKE_HOURS = { morning: 5, intermediate: 7, evening: 9 };
+      const isLateNight = nowHour >= 21;
+      const scheduleStartHour = isLateNight ? (WAKE_HOURS[characterType] || 7) : nowHour;
+      
+      if (isLateNight) {
+        console.log(`Late night mode (${nowHour.toFixed(2)}h) — scheduling from ${scheduleStartHour}:00 (${characterType} wake time)`);
+      }
+      
       console.log(`Current time: ${nowDate.getHours()}:${String(nowDate.getMinutes()).padStart(2, '0')} (${nowHour.toFixed(2)} hours)`);
+      console.log(`Schedule start hour: ${scheduleStartHour.toFixed(2)}`);
       console.log(`API_URL: ${API_URL}`);
       
       // Helper: Check if a time slot overlaps with any fixed block OR scheduled task
@@ -744,22 +1082,22 @@ Input: "meeting 10-11 pagi"
           return !(taskEnd <= sStart || taskStart >= sEnd);
         });
         
-        console.log(`Checking slot ${startSlot}-${taskEnd}: fixed=${fixedOverlap}, sched=${schedOverlap}`);
         return fixedOverlap || schedOverlap;
       };
       
       // Helper: Find next available slot that doesn't conflict with fixed blocks or existing schedule
       const findNextAvailableSlot = (fromHour, duration, existingSched) => {
         const slotsNeeded = Math.max(1, Math.round(duration * 2));
-        const endOfDay = 46; // 23:00
+        const endOfDay = 48; // Full day (24:00)
         
         // Start from a properly calculated slot, ensuring we don't go backwards in time
         let startSlot = Math.ceil(fromHour * 2); // Use ceil to round up to next slot
         if (startSlot < 0) startSlot = 0;
+        if (startSlot >= endOfDay) startSlot = 0; // Wrap to start of day if past end
         
         console.log(`Finding slot for ${duration}h task starting from hour ${fromHour.toFixed(2)} (slot ${startSlot})`);
         
-        // Scan every slot from now onwards
+        // Scan every slot from start onwards
         for (let slot = startSlot; slot + slotsNeeded <= endOfDay; slot++) {
           if (!isSlotOccupied(slot, slotsNeeded, existingSched)) {
             const schedHour = slot / 2;
@@ -772,15 +1110,13 @@ Input: "meeting 10-11 pagi"
         return null;
       };
       
-      // Filter flexible tasks that have NOT passed their deadline yet
+      // Include all tasks — let the DDQN model decide priority even for overdue ones
       const tasksToSchedule = activeTasks.filter(t => {
         const taskDeadline = deadlineToHour(t.deadline);
-        // Only include tasks with future deadlines (or no deadline)
-        const isViable = !t.deadline || taskDeadline > nowHour;
-        if (!isViable) {
-          console.log(`Skipping task "${t.title}" with expired deadline ${t.deadline} (${taskDeadline.toFixed(2)} < ${nowHour.toFixed(2)})`);
+        if (t.deadline && taskDeadline <= nowHour) {
+          console.log(`Task "${t.title}" has passed deadline ${t.deadline} — still including for DDQN`);
         }
-        return isViable;
+        return true; // Always include, DDQN handles urgency
       });
       
       // Modal DDQN API requires building schedule incrementally.
@@ -792,7 +1128,7 @@ Input: "meeting 10-11 pagi"
       const verifyNoFixedEvents = (tasksArray) => tasksArray.filter(t => t.is_fixed !== true);
       let localTasks = verifyNoFixedEvents(tasksToSchedule);
       let sched = [];
-      let currTimeHour = nowHour;
+      let currTimeHour = scheduleStartHour;
       let isFirstCall = true;
       
       let sanity = 10;
@@ -800,14 +1136,32 @@ Input: "meeting 10-11 pagi"
          sanity--;
          
          // Use local DDQN API endpoint format (correct format)
-         const currentIsoDate = new Date();
+         const currentIsoDate = getNow();
          currentIsoDate.setHours(Math.floor(currTimeHour), Math.round((currTimeHour % 1) * 60), 0, 0);
+
+         // Strip milliseconds from ISO string (backend format: %Y-%m-%dT%H:%M:%S)
+         const isoNoMs = currentIsoDate.toISOString().replace(/\.\d{3}Z$/, "Z");
 
          const payload = {
            user_id: "user_001",
-           current_time_iso: currentIsoDate.toISOString(),
+           current_time_iso: isoNoMs,
            chronotype: characterType,
            current_vibe: vibe,
+           // RL: Send history using backend's expected field name
+           user_history_records: historyRecords.slice(-50).map(r => ({
+             task_type: r.task_type,
+             scheduled_slot: r.scheduled_slot,
+             duration_hours: r.duration_hours,
+             completed_on_time: r.completed_on_time,
+             was_abandoned: r.was_abandoned,
+             vibe_before: r.vibe_before,
+             vibe_after: r.vibe_after,
+             date: r.date,
+             day: r.day,
+             actual_duration_hours: r.actual_duration_hours,
+             is_buffer: r.is_buffer,
+             user_accepted_buffer: r.user_accepted_buffer,
+           })),
            entries: localTasks.map((t) => ({
              id: t.id,
              type: "flexible",
@@ -816,7 +1170,7 @@ Input: "meeting 10-11 pagi"
              duration: `${Math.round((parseFloat(t.duration) || 0.5) * 60)}m`,
              priority: t.priority || 3,
              cognitive_demand: t.cognitive_demand || 3,
-             deadline: t.deadline || null
+             deadline: t.deadline || null,
            }))
          };
 
@@ -882,8 +1236,19 @@ Input: "meeting 10-11 pagi"
       }
 
       setSchedule(sched);
+      // RL: Persist schedule per date for week view history
+      const todayStr = getNow().toISOString().split('T')[0];
+      db.setScheduleByDate(todayStr, sched);
+      db.setFixedEventsByDate(todayStr, fixedBlocks);
+      db.updateUser({ lastActiveDate: todayStr });
+
+      // Demo mode: auto-advance after DDQN model generates
+      if (demoStep >= 1) {
+        demoAfterGenerate(sched);
+      }
+
       if (sched.length > 0) {
-        showToast("AI Schedule Generated!");
+        showToast(`AI Schedule Generated! (${sched.length} tasks, RL history: ${historyRecords.length} records)`);
       } else {
         showToast("⚠️ No schedule generated. Check API or try fallback scheduler.");
       }
@@ -930,12 +1295,17 @@ Input: "meeting 10-11 pagi"
       ? t.total_duration
       : t.total_duration + Math.floor((Date.now() - t.last_started_at) / 1000);
 
+  // RL: Use history-adapted energy profile instead of static one
   const energyProfile = useMemo(
-    () => buildEnergyProfile(vibe, characterType),
-    [vibe, characterType]
+    () => buildRLEnergyProfile(vibe, characterType, historyRecords),
+    [vibe, characterType, historyRecords]
+  );
+  const rlSummary = useMemo(
+    () => getRLSummary(historyRecords),
+    [historyRecords]
   );
   const maxEnergy = Math.max(...energyProfile);
-  const nowSlot = new Date().getHours() * 2 + (new Date().getMinutes() >= 30 ? 1 : 0);
+  const nowSlot = getNow().getHours() * 2 + (getNow().getMinutes() >= 30 ? 1 : 0);
 
   const S = {
     app: { display: "flex", height: "100vh", background: "#09090b", color: "#e4e4e7", overflow: "hidden", fontSize: 13 },
@@ -1016,12 +1386,38 @@ Input: "meeting 10-11 pagi"
             {view === "dashboard" && (
               <>
                 <button style={S.btn} onClick={() => { setShowAddTask(!showAddTask); setForm((f) => ({ ...f, is_fixed: false })); }}>+ Task</button>
-                <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={doGenerate} disabled={scheduleLoading}>
+                <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={handleAISchedule} disabled={scheduleLoading}>
                   {scheduleLoading ? "⏳ Scheduling..." : "◈ AI Schedule"}
                 </button>
+                <button style={{ ...S.btn, color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)", fontSize: 10 }} onClick={loadBufferDemo}>📦 Buffer Demo</button>
+                <button style={{ ...S.btn, color: "#ef4444", fontSize: 10 }} onClick={demoReset}>✕ Reset</button>
               </>
             )}
-            {view === "schedule" && <button style={S.btnP} onClick={doGenerate}>↻ Regenerate</button>}
+            {view === "schedule" && (
+              <>
+                <button style={scheduleLoading ? { ...S.btnP, opacity: 0.6 } : S.btnP} onClick={handleAISchedule} disabled={scheduleLoading}>
+                  {scheduleLoading ? "⏳ Generating..." : "↻ AI Schedule"}
+                </button>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: 8, padding: "4px 8px", borderRadius: 6, background: "rgba(129,140,248,0.08)", border: "1px solid rgba(129,140,248,0.2)" }}>
+                  <span style={{ fontSize: 9, color: "#818cf8", fontWeight: 700 }}>RL DEMO:</span>
+                  <button
+                    style={{ ...S.btn, color: demoStep >= 1 ? "#52525b" : "#34d399", borderColor: demoStep >= 1 ? "rgba(82,82,91,0.3)" : "rgba(52,211,153,0.4)", fontSize: 10, padding: "4px 8px" }}
+                    onClick={demoStep1_LoadTasks}
+                  >①Muat Task</button>
+                  <button
+                    style={{ ...S.btn, color: demoStep < 1 || !schedule.length ? "#3f3f46" : demoStep >= 2 ? "#52525b" : "#f59e0b", borderColor: demoStep < 1 || !schedule.length ? "rgba(63,63,70,0.3)" : "rgba(245,158,11,0.4)", fontSize: 10, padding: "4px 8px" }}
+                    onClick={demoStep2_SaveAndInject}
+                    disabled={demoStep < 1 || !schedule.length}
+                  >②Inject History</button>
+                  {demoStep > 0 && (
+                    <span style={{ fontSize: 9, color: demoStep === 3 ? "#22c55e" : "#a1a1aa" }}>
+                      {demoStep === 1 ? "→ Klik AI Schedule" : demoStep === 2 ? "→ Klik AI Schedule lagi" : "✅ Bandingkan!"}
+                    </span>
+                  )}
+                  {demoStep > 0 && <button style={{ ...S.btn, color: "#ef4444", fontSize: 10, padding: "4px 6px" }} onClick={demoReset}>✕</button>}
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -1061,11 +1457,12 @@ Input: "meeting 10-11 pagi"
                       )}
                     </div>
                     {!form.is_fixed && (
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 8 }}>
                         <div><label style={{fontSize:9}}>DURATION (min)</label><input type="number" value={form.duration_estimate} onChange={e => setForm({...form, duration_estimate: +e.target.value})} style={S.input}/></div>
                         <div><label style={{fontSize:9}}>PRIORITY</label><select value={form.priority} onChange={e => setForm({...form, priority: +e.target.value})} style={S.select}>{[1,2,3,4,5].map(i => <option key={i} value={i}>{i}</option>)}</select></div>
                         <div><label style={{fontSize:9}}>COGNITIVE DEMAND</label><select value={form.cognitive_demand} onChange={e => setForm({...form, cognitive_demand: +e.target.value})} style={S.select}>{[1,2,3,4,5].map(i => <option key={i} value={i}>{i}</option>)}</select></div>
-                        <div><label style={{fontSize:9}}>DEADLINE</label><input type="time" value={form.deadline} onChange={e => setForm({...form, deadline: e.target.value})} style={S.input} /></div>
+                        <div><label style={{fontSize:9}}>DEADLINE TIME</label><input type="time" value={form.deadline} onChange={e => setForm({...form, deadline: e.target.value})} style={S.input} /></div>
+                        <div><label style={{fontSize:9}}>DEADLINE DATE</label><input type="date" value={form.deadline_date} onChange={e => setForm({...form, deadline_date: e.target.value})} style={S.input} /></div>
                       </div>
                     )}
                     <div style={{ display: "flex", justifyContent: "flex-end" }}>
@@ -1154,7 +1551,7 @@ Input: "meeting 10-11 pagi"
                   <div style={{ fontSize: 11, color: "#a1a1aa", letterSpacing: 1 }}>FLEXIBLE TASKS</div>
               {activeTasks.map((task) => {
                 const elapsed = getElapsed(task);
-                const isLate = task.deadline && deadlineToHour(task.deadline) < (new Date().getHours() + new Date().getMinutes() / 60);
+                const isLate = task.deadline && deadlineToHour(task.deadline) < (getNow().getHours() + getNow().getMinutes() / 60);
                 return (
                   <div key={task.id} style={{ ...S.card, borderColor: task.is_running ? "rgba(52,211,153,0.3)" : "rgba(255,255,255,0.06)" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1188,6 +1585,39 @@ Input: "meeting 10-11 pagi"
                 </div>
               </div>
 
+              {/* Buffer Pool Section */}
+              {bufferPool.length > 0 && (
+                <div style={{ flex: "1 1 100%", marginTop: 8, padding: "12px 16px", background: "rgba(245,158,11,0.04)", border: "1px solid rgba(245,158,11,0.15)", borderRadius: 8 }}>
+                  <div style={{ fontSize: 11, color: "#f59e0b", letterSpacing: 1, fontWeight: 700, marginBottom: 8 }}>📦 BUFFER POOL ({bufferPool.length})</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {bufferPool.map(task => {
+                      const today = getNow().toISOString().split("T")[0];
+                      const daysLeft = task.deadline_date ? Math.ceil((new Date(task.deadline_date) - new Date(today)) / 86400000) : "?";
+                      const urgent = daysLeft <= 1;
+                      return (
+                        <div key={task.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", borderRadius: 6, background: urgent ? "rgba(239,68,68,0.08)" : "rgba(255,255,255,0.02)", border: `1px solid ${urgent ? "rgba(239,68,68,0.2)" : "rgba(255,255,255,0.06)"}` }}>
+                          <div>
+                            <span style={{ fontWeight: 600, fontSize: 12, color: "#e4e4e7" }}>{task.title}</span>
+                            <span style={{ ...S.badge(BLOCK_COLORS[task.task_type || "routine"]), marginLeft: 6 }}>{task.task_type}</span>
+                            {task.partial_done > 0 && <span style={{ fontSize: 9, color: "#f59e0b", marginLeft: 6 }}>{(task.partial_done * 100).toFixed(0)}%</span>}
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 10, color: urgent ? "#ef4444" : "#a1a1aa" }}>
+                              📅 {task.deadline_date} ({daysLeft}d left)
+                            </span>
+                            <button onClick={() => {
+                              setBufferPool(prev => prev.filter(t => t.id !== task.id));
+                              setTasks(prev => [{ ...task, is_buffer: false }, ...prev]);
+                              showToast(`✅ "${task.title}" moved to active tasks`);
+                            }} style={{ ...S.btn, color: "#34d399", fontSize: 10 }}>→ Active</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Right Side: Timeline */}
               <div style={{ flex: "1 1 40%", borderLeft: "1px solid rgba(255,255,255,0.06)", paddingLeft: 24, overflowY: "auto", overflowX: "hidden", paddingRight: 8, minHeight: 0 }}>
                 <div style={{ fontSize: 13, color: "#a1a1aa", letterSpacing: 1, fontWeight: 700, marginBottom: 12 }}>TODAY'S SCHEDULE</div>
@@ -1196,35 +1626,163 @@ Input: "meeting 10-11 pagi"
             </div>
           )}
 
+          {/* Buffer Prompt Modal */}
+          {showBufferPrompt && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }}>
+              <div style={{ background: "#18181b", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 12, padding: 24, maxWidth: 500, width: "90%" }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#f59e0b", marginBottom: 12 }}>📦 Buffer Tasks Getting Urgent!</div>
+                <div style={{ fontSize: 11, color: "#a1a1aa", marginBottom: 16 }}>Task-task di bawah deadline-nya sudah dekat. Mau kerjakan hari ini?</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+                  {bufferPromptTasks.map(task => (
+                    <div key={task.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderRadius: 8, background: task._accepted === true ? "rgba(34,197,94,0.1)" : task._accepted === false ? "rgba(239,68,68,0.05)" : "rgba(255,255,255,0.03)", border: `1px solid ${task._accepted === true ? "rgba(34,197,94,0.3)" : task._accepted === false ? "rgba(239,68,68,0.15)" : "rgba(255,255,255,0.08)"}` }}>
+                      <div>
+                        <div style={{ fontWeight: 600, color: "#e4e4e7", fontSize: 12 }}>{task.title}</div>
+                        <div style={{ fontSize: 10, color: "#71717a" }}>
+                          {task.task_type} • {task.duration}h • deadline: {task.deadline_date}
+                          {task.partial_done > 0 && <span style={{ color: "#f59e0b" }}> • {(task.partial_done * 100).toFixed(0)}% done</span>}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          onClick={() => handleBufferDecision(task.id, true)}
+                          style={{ ...S.btn, color: task._accepted === true ? "#fff" : "#34d399", background: task._accepted === true ? "rgba(34,197,94,0.3)" : "transparent", borderColor: "rgba(34,197,94,0.3)", fontSize: 10, padding: "4px 10px" }}
+                        >✅ Kerjakan</button>
+                        <button
+                          onClick={() => handleBufferDecision(task.id, false)}
+                          style={{ ...S.btn, color: task._accepted === false ? "#fff" : "#71717a", background: task._accepted === false ? "rgba(239,68,68,0.2)" : "transparent", borderColor: "rgba(113,113,122,0.3)", fontSize: 10, padding: "4px 10px" }}
+                        >⏭ Skip</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                  <button onClick={() => { setShowBufferPrompt(false); setBufferPromptTasks([]); }} style={{ ...S.btn, color: "#71717a" }}>Cancel</button>
+                  <button onClick={handleBufferConfirm} style={S.btnP}>Lanjut Generate →</button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {view === "schedule" && (
              <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 12 }}>
-               {/* Week view: Days and time slots */}
-               <div style={{ flex: 1, display: "flex", gap: 1, overflowX: "auto", overflowY: "auto", background: "rgba(255,255,255,0.01)", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", padding: 12 }}>
-                 {/* Create 7 columns for each day */}
+               {/* RL Learning Stats Bar */}
+               <div style={{ display: "flex", gap: 16, padding: "12px 16px", background: "rgba(52,211,153,0.04)", border: "1px solid rgba(52,211,153,0.15)", borderRadius: 8, alignItems: "center", flexWrap: "wrap" }}>
+                 <div style={{ fontSize: 10, fontWeight: 700, color: "#34d399", letterSpacing: 1 }}>🧠 RL LEARNING</div>
+                 <div style={{ fontSize: 10, color: "#a1a1aa" }}>
+                   Records: <span style={{ color: "#e4e4e7", fontWeight: 600 }}>{rlSummary.totalRecords}</span>
+                 </div>
+                 <div style={{ fontSize: 10, color: "#a1a1aa" }}>
+                   Completion: <span style={{ color: rlSummary.completionRate > 0.7 ? "#34d399" : "#f59e0b", fontWeight: 600 }}>{(rlSummary.completionRate * 100).toFixed(0)}%</span>
+                 </div>
+                 <div style={{ fontSize: 10, color: "#a1a1aa" }}>
+                   On-time: <span style={{ color: rlSummary.onTimeRate > 0.7 ? "#34d399" : "#f59e0b", fontWeight: 600 }}>{(rlSummary.onTimeRate * 100).toFixed(0)}%</span>
+                 </div>
+                 {rlSummary.bestSlots.length > 0 && (
+                   <div style={{ fontSize: 10, color: "#a1a1aa" }}>
+                     Best slots: <span style={{ color: "#34d399", fontWeight: 600 }}>{rlSummary.bestSlots.join(", ")}</span>
+                   </div>
+                 )}
+                 {rlSummary.worstSlots.length > 0 && (
+                   <div style={{ fontSize: 10, color: "#a1a1aa" }}>
+                     Weak slots: <span style={{ color: "#ef4444", fontWeight: 600 }}>{rlSummary.worstSlots.join(", ")}</span>
+                   </div>
+                 )}
+                 <div style={{ fontSize: 10, color: "#a1a1aa" }}>
+                   Episode Day: <span style={{ color: "#818cf8", fontWeight: 600 }}>{userState.current_day + 1}/5</span>
+                 </div>
+               </div>
+
+               {/* RL Demo Comparison Panel — only shown during demo */}
+               {demoStep >= 1 && (
+                 <div style={{ display: "flex", gap: 12, padding: "12px 16px", background: "rgba(129,140,248,0.04)", border: "1px solid rgba(129,140,248,0.15)", borderRadius: 8 }}>
+                   {/* Before RL */}
+                   <div style={{ flex: 1 }}>
+                     <div style={{ fontSize: 10, fontWeight: 700, color: "#f59e0b", marginBottom: 6 }}>📋 SEBELUM RL (Step 1)</div>
+                     {demoBaseSchedule ? demoBaseSchedule.map((t, i) => {
+                       const c = BLOCK_COLORS[t.task_type] || BLOCK_COLORS.routine;
+                       return (
+                         <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", padding: "3px 6px", marginBottom: 2, borderRadius: 4, background: c.bg, fontSize: 10 }}>
+                           <span style={{ color: "#a1a1aa", fontWeight: 600, width: 40 }}>{slotToTime(t.scheduled_start)}</span>
+                           <span style={{ color: c.text, fontWeight: 600 }}>{t.title}</span>
+                           <span style={{ color: "#71717a", fontSize: 8 }}>({t.task_type})</span>
+                         </div>
+                       );
+                     }) : <div style={{ fontSize: 10, color: "#52525b" }}>Belum di-generate</div>}
+                   </div>
+
+                   {/* Arrow */}
+                   <div style={{ display: "flex", alignItems: "center", padding: "0 8px" }}>
+                     <div style={{ fontSize: 18, color: demoStep >= 3 ? "#22c55e" : "#3f3f46" }}>{demoStep >= 3 ? "→" : "⋯"}</div>
+                   </div>
+
+                   {/* After RL */}
+                   <div style={{ flex: 1 }}>
+                     <div style={{ fontSize: 10, fontWeight: 700, color: demoStep >= 3 ? "#22c55e" : "#3f3f46", marginBottom: 6 }}>✅ SESUDAH RL (Step 3)</div>
+                     {demoStep >= 3 ? schedule.map((t, i) => {
+                       const c = BLOCK_COLORS[t.task_type] || BLOCK_COLORS.routine;
+                       const beforeTask = demoBaseSchedule?.find(b => b.id === t.id);
+                       const moved = beforeTask && beforeTask.scheduled_start !== t.scheduled_start;
+                       return (
+                         <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", padding: "3px 6px", marginBottom: 2, borderRadius: 4, background: moved ? "rgba(34,197,94,0.15)" : c.bg, fontSize: 10, border: moved ? "1px solid rgba(34,197,94,0.3)" : "none" }}>
+                           <span style={{ color: "#a1a1aa", fontWeight: 600, width: 40 }}>{slotToTime(t.scheduled_start)}</span>
+                           <span style={{ color: c.text, fontWeight: 600 }}>{t.title}</span>
+                           {moved && <span style={{ color: "#22c55e", fontSize: 8, fontWeight: 700 }}>↑ PINDAH dari {slotToTime(beforeTask.scheduled_start)}</span>}
+                         </div>
+                       );
+                     }) : <div style={{ fontSize: 10, color: "#52525b" }}>{demoStep <= 2 ? "Klik 'AI Schedule' setelah inject history" : "Loading..."}</div>}
+                   </div>
+
+                   {/* Step explanation */}
+                   <div style={{ flex: 1, borderLeft: "1px solid rgba(255,255,255,0.06)", paddingLeft: 12, fontSize: 10, color: "#a1a1aa", lineHeight: 1.6 }}>
+                     <div style={{ fontWeight: 700, color: "#818cf8", marginBottom: 4 }}>💡 Penjelasan</div>
+                     {demoStep === 1 && <div>Tasks dimuat. Klik <span style={{ color: "#34d399" }}>'AI Schedule'</span> untuk generate jadwal dari <span style={{ color: "#f59e0b" }}>DDQN model TANPA RL history</span>.</div>}
+                     {demoStep === 2 && <div><span style={{ color: "#f59e0b" }}>{historyRecords.length} record</span> history di-inject. RL belajar: <span style={{ color: "#22c55e" }}>pagi produktif</span>, <span style={{ color: "#ef4444" }}>siang abandon</span>. Klik <span style={{ color: "#34d399" }}>'AI Schedule'</span> lagi!</div>}
+                     {demoStep === 3 && <div>DDQN model menghasilkan jadwal <span style={{ color: "#22c55e" }}>berbeda</span> karena menerima <span style={{ color: "#22c55e" }}>user_history_records</span> yang mengubah state vector model.</div>}
+                   </div>
+                 </div>
+               )}
+
+               {/* Week view: Shows last 6 days + today (7 days total with history) */}
+               <div key={`week-${weekViewKey}`} style={{ flex: 1, display: "flex", gap: 1, overflowX: "auto", overflowY: "auto", background: "rgba(255,255,255,0.01)", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", padding: 12 }}>
                  {Array.from({ length: 7 }, (_, dayIdx) => {
-                   const dayDate = new Date();
-                   dayDate.setDate(dayDate.getDate() + dayIdx);
+                   const dayDate = new Date(getNow().getTime());
+                   dayDate.setDate(dayDate.getDate() - (6 - dayIdx)); // 6 days ago to today
                    const dayName = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dayDate.getDay()];
                    const dateStr = `${dayDate.getMonth() + 1}/${dayDate.getDate()}`;
+                   const dateKey = dayDate.toISOString().split('T')[0];
+                   const isToday = dayIdx === 6;
+
+                   // RL: Load per-date schedule — today uses live state, past days use stored history
+                   const daySchedule = isToday ? schedule : db.getScheduleByDate(dateKey);
+                   const dayFixed = isToday ? fixedBlocks : db.getFixedEventsByDate(dateKey);
+                   const hasData = daySchedule.length > 0 || dayFixed.length > 0;
                    
                    return (
-                     <div key={dayIdx} style={{ flex: "0 0 180px", display: "flex", flexDirection: "column", borderRight: dayIdx < 6 ? "1px solid rgba(255,255,255,0.06)" : "none", minHeight: 0 }}>
+                     <div key={`${dayIdx}-${dateKey}`} style={{ flex: "0 0 180px", display: "flex", flexDirection: "column", borderRight: dayIdx < 6 ? "1px solid rgba(255,255,255,0.06)" : "none", minHeight: 0, opacity: isToday ? 1 : (hasData ? 0.85 : 0.5) }}>
                        {/* Day header */}
-                       <div style={{ padding: "10px", borderBottom: "1px solid rgba(255,255,255,0.06)", background: "rgba(52,211,153,0.05)", textAlign: "center" }}>
-                         <div style={{ fontSize: 12, fontWeight: 700, color: "#34d399" }}>{dayName}</div>
-                         <div style={{ fontSize: 10, color: "#71717a" }}>{dateStr}</div>
+                       <div style={{
+                         padding: "10px",
+                         borderBottom: "1px solid rgba(255,255,255,0.06)",
+                         background: isToday ? "rgba(52,211,153,0.12)" : hasData ? "rgba(129,140,248,0.05)" : "rgba(255,255,255,0.02)",
+                         textAlign: "center",
+                       }}>
+                         <div style={{ fontSize: 12, fontWeight: 700, color: isToday ? "#34d399" : hasData ? "#818cf8" : "#52525b" }}>
+                           {isToday ? "TODAY" : dayName}
+                         </div>
+                         <div style={{ fontSize: 10, color: isToday ? "#34d399" : "#71717a" }}>{dateStr}</div>
+                         {hasData && !isToday && <div style={{ fontSize: 8, color: "#818cf8", marginTop: 2 }}>{daySchedule.length} tasks</div>}
                        </div>
                        
                        {/* Time slots grid */}
                        <div style={{ flex: 1, overflowY: "auto", position: "relative", borderLeft: "1px solid rgba(255,255,255,0.06)" }}>
                          {Array.from({ length: 48 }, (_, slot) => {
                            const hour = Math.floor(slot / 2);
-                           const isHour = slot % 2 === 0;
+                           const isHourMark = slot % 2 === 0;
                            const timeStr = String(hour).padStart(2, "0") + ":00";
                            
-                           // Find schedules for this slot on this day
-                           const scheduledHere = schedule.find((s) => slot >= s.scheduled_start && slot < s.scheduled_start + s.scheduled_slots);
-                           const fixedHere = fixedBlocks.find((fb) => slot >= fb.startSlot && slot < fb.endSlot);
+                           // Use per-date schedule data (not global schedule)
+                           const scheduledHere = daySchedule.find((s) => slot >= s.scheduled_start && slot < s.scheduled_start + s.scheduled_slots);
+                           const fixedHere = dayFixed.find((fb) => slot >= fb.startSlot && slot < fb.endSlot);
                            
                            return (
                              <div
@@ -1232,14 +1790,14 @@ Input: "meeting 10-11 pagi"
                                style={{
                                  padding: "4px",
                                  minHeight: 28,
-                                 borderBottom: isHour ? "1px solid rgba(255,255,255,0.06)" : "1px solid rgba(255,255,255,0.02)",
-                                 background: isHour ? "transparent" : "rgba(255,255,255,0.005)",
+                                 borderBottom: isHourMark ? "1px solid rgba(255,255,255,0.06)" : "1px solid rgba(255,255,255,0.02)",
+                                 background: isHourMark ? "transparent" : "rgba(255,255,255,0.005)",
                                  position: "relative",
                                  fontSize: 8,
                                  color: "#52525b",
                                }}
                              >
-                               {isHour && <span style={{ lineHeight: "12px" }}>{timeStr}</span>}
+                               {isHourMark && <span style={{ lineHeight: "12px" }}>{timeStr}</span>}
                                
                                {/* Show fixed event if starts at this slot */}
                                {fixedHere && slot === fixedHere.startSlot && (
@@ -1296,7 +1854,7 @@ Input: "meeting 10-11 pagi"
                </div>
                
                {/* Legend */}
-               <div style={{ display: "flex", gap: 16, fontSize: 11, color: "#71717a" }}>
+               <div style={{ display: "flex", gap: 16, fontSize: 11, color: "#71717a", flexWrap: "wrap" }}>
                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                    <div style={{ width: 16, height: 16, background: "rgba(99,102,241,0.2)", borderRadius: 2 }} />
                    <span>Fixed Events</span>
@@ -1312,6 +1870,14 @@ Input: "meeting 10-11 pagi"
                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                    <div style={{ width: 16, height: 16, background: BLOCK_COLORS.creative.bg, borderRadius: 2 }} />
                    <span>Creative</span>
+                 </div>
+                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                   <div style={{ width: 10, height: 10, borderRadius: "50%", background: "rgba(52,211,153,0.4)" }} />
+                   <span>Today</span>
+                 </div>
+                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                   <div style={{ width: 10, height: 10, borderRadius: "50%", background: "rgba(129,140,248,0.4)" }} />
+                   <span>Has History</span>
                  </div>
                </div>
              </div>

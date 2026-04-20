@@ -1,0 +1,141 @@
+╔══════════════════════════════════════════════════════════════════╗
+║                    BUFFER SYSTEM FLOW                            ║
+║  (runs inside the DDQN scheduling loop, no manual day triggers)  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+USER ADDS TASKS (NL parse or manual)
+       │
+       ▼
+EACH TASK HAS A deadline_day
+       │
+       ├── deadline_day == today (day 0) → goes to active task pool
+       │
+       └── deadline_day > today (day 1, 2, 3...) → goes to BUFFER
+                                                     │
+                                                     ▼
+                                              ┌──────────────┐
+                                              │ BUFFER POOL  │
+                                              │              │
+                                              │ task A (d2)  │
+                                              │ task B (d3)  │
+                                              │ task C (d4)  │
+                                              └──────┬───────┘
+                                                     │
+                    ┌────────────────────────────────┘
+                    │
+                    ▼
+         EACH SCHEDULING CYCLE (when user clicks "AI Schedule"):
+                    │
+                    ▼
+         ┌──────────────────────────────────────────┐
+         │ CHECK BUFFER:                             │
+         │ Pull tasks where                          │
+         │ deadline_day ≤ current_day + 1            │
+         │                                           │
+         │ (deadline is today or tomorrow =           │
+         │  getting urgent, offer to user)            │
+         └──────┬────────────────────────────────────┘
+                │
+                ├── No tasks pulled → skip, schedule normally
+                │
+                ▼ Tasks found
+         ┌──────────────────────────────────────────┐
+         │ BUFFER PROMPT (inline, per task):         │
+         │                                           │
+         │ "KODING ML PROJECT is due tomorrow.       │
+         │  Work on it today?"                       │
+         │                                           │
+         │  [Yes, add to today]  [No, keep in buffer]│
+         │                                           │
+         │ Record decision → buffer_accept_rate      │
+         └──────┬────────────────────────────────────┘
+                │
+                ├── Yes → move to active task pool
+                │         (DDQN schedules it with other tasks)
+                │
+                ├── No  → stays in buffer
+                │         days_in_buffer += 1
+                │
+                ▼
+         ┌──────────────────────────────────────────┐
+         │ DDQN SCHEDULES ALL ACTIVE TASKS           │
+         │ (today's tasks + accepted buffer tasks)   │
+         │                                           │
+         │ Schedule generated → user works            │
+         └──────┬────────────────────────────────────┘
+                │
+                ▼
+         AFTER SCHEDULING, TASKS HAVE 3 OUTCOMES:
+                │
+                ├── COMPLETED → archive, record history
+                │
+                ├── ABANDONED (partial_done = 0.5)
+                │   └── deadline is future? → BACK TO BUFFER
+                │       deadline is today?  → record as late
+                │
+                └── NOT REACHED (clock > 22:00, day ran out)
+                    └── deadline is future? → BACK TO BUFFER
+                        deadline is today?  → record as late
+
+
+         current_day advances automatically
+         (episode tracks day 1/5 → 2/5 → ... → 5/5)
+
+         Next time user clicks "AI Schedule":
+         buffer is checked again, cycle repeats
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  WHAT THE DEVELOPER NEEDS TO BUILD                               ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  1. When tasks are added (from Gemini or manual):                ║
+║     - Compute deadline_day for each task                         ║
+║     - If deadline_day > current_day → bufferPool                 ║
+║     - If deadline_day == current_day → active tasks              ║
+║                                                                  ║
+║  2. When "AI Schedule" is clicked (before calling DDQN):         ║
+║     - Check bufferPool for tasks where                           ║
+║       deadline_day <= current_day + 1                            ║
+║     - Show inline prompt per task: accept / decline              ║
+║     - Accepted tasks → merge into active task pool               ║
+║     - Declined tasks → stay in buffer                            ║
+║     - Record accept/decline in historyRecords                    ║
+║     - THEN call DDQN with merged task list                       ║
+║                                                                  ║
+║  3. After schedule runs (tasks complete/abandon/not reached):    ║
+║     - Completed → archive as normal                              ║
+║     - Abandoned + future deadline → back to bufferPool           ║
+║       with partial_done preserved                                ║
+║     - Not reached + future deadline → back to bufferPool         ║
+║     - Not reached + today deadline → record as late              ║
+║                                                                  ║
+║  4. current_day advances when all today-deadline tasks           ║
+║     are either completed, abandoned, or marked late              ║
+║     (or user manually advances via episode counter)              ║
+║                                                                  ║
+║  NO "Start Day" button. NO "End Day" button.                     ║
+║  Buffer check happens automatically before each schedule gen.    ║
+║  Day advances automatically based on task completion state.      ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  BUFFER TASK DATA STRUCTURE                                      ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  {                                                               ║
+║    id: "task_123",                                               ║
+║    title: "KODING ML PROJECT",                                   ║
+║    task_type: "analytical",                                      ║
+║    duration: 2.0,                                                ║
+║    deadline: "16:00",                                            ║
+║    deadline_day: 3,          // absolute day number              ║
+║    priority: 4,                                                  ║
+║    cognitive_demand: 4,                                          ║
+║    partial_done: 0.0,        // 0.5 if previously abandoned      ║
+║  }                                                               ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝

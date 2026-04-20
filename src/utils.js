@@ -172,3 +172,146 @@ export function generateScheduleFallback(tasks, fixedBlocks, vibe, characterType
   const scheduled = workerAgent(tasks, managerBlocks, energyProfile, occupied);
   return { scheduled, managerBlocks, energyProfile };
 }
+
+// ========== REINFORCEMENT LEARNING: Energy Profile Adaptation ==========
+
+/**
+ * Compute per-slot energy modifiers from task completion history.
+ * Tasks completed on-time at a slot → boost energy estimate (model learns user is productive there).
+ * Tasks abandoned at a slot → reduce energy estimate (model learns user struggles there).
+ * 
+ * Returns an array of 48 floats (modifiers centered around 1.0).
+ */
+export function computeRLModifiers(historyRecords) {
+  const modifiers = new Array(TOTAL_SLOTS).fill(1.0);
+  if (!historyRecords || historyRecords.length === 0) return modifiers;
+
+  const slotScores = new Array(TOTAL_SLOTS).fill(0);
+  const slotCounts = new Array(TOTAL_SLOTS).fill(0);
+
+  // Weight recent records more heavily (exponential decay)
+  const totalRecords = historyRecords.length;
+
+  for (let i = 0; i < totalRecords; i++) {
+    const rec = historyRecords[i];
+    const slot = rec.scheduled_slot;
+    if (slot == null || slot < 0 || slot >= TOTAL_SLOTS) continue;
+
+    const slotsUsed = Math.max(1, Math.ceil((rec.duration_hours || 0.5) * 2));
+    // Recency weight: more recent records have higher weight
+    const recencyWeight = 0.5 + 0.5 * (i / totalRecords);
+
+    for (let s = slot; s < Math.min(TOTAL_SLOTS, slot + slotsUsed); s++) {
+      slotCounts[s] += recencyWeight;
+      if (rec.was_abandoned) {
+        slotScores[s] -= 0.6 * recencyWeight; // penalize slots where user abandoned
+      } else if (rec.completed_on_time) {
+        slotScores[s] += 1.0 * recencyWeight; // reward successful on-time completion
+      } else {
+        slotScores[s] += 0.3 * recencyWeight; // completed but late — slight positive
+      }
+    }
+  }
+
+  // Also learn from task-type patterns: which types succeed at which slots
+  const typeSlotSuccess = {}; // { "analytical": { slot: score, ... }, ... }
+  for (const rec of historyRecords) {
+    const slot = rec.scheduled_slot;
+    const type = rec.task_type;
+    if (slot == null || !type) continue;
+    if (!typeSlotSuccess[type]) typeSlotSuccess[type] = {};
+    if (!typeSlotSuccess[type][slot]) typeSlotSuccess[type][slot] = { success: 0, total: 0 };
+    typeSlotSuccess[type][slot].total++;
+    if (!rec.was_abandoned && rec.completed_on_time) {
+      typeSlotSuccess[type][slot].success++;
+    }
+  }
+
+  // Convert accumulated scores to modifiers (range: 0.4 to 1.8)
+  for (let s = 0; s < TOTAL_SLOTS; s++) {
+    if (slotCounts[s] > 0) {
+      const avgScore = slotScores[s] / slotCounts[s]; // range: roughly -0.6 to 1.0
+      modifiers[s] = Math.max(0.4, Math.min(1.8, 1.0 + avgScore * 0.5));
+    }
+  }
+
+  return modifiers;
+}
+
+/**
+ * Build an RL-adjusted energy profile that incorporates learned patterns from history.
+ * Combines the base chronotype curve with RL modifiers from past task performance.
+ */
+export function buildRLEnergyProfile(vibe, characterType, historyRecords) {
+  const baseProfile = buildEnergyProfile(vibe, characterType);
+  const modifiers = computeRLModifiers(historyRecords);
+
+  return baseProfile.map((val, i) =>
+    Math.max(0.05, Math.min(1.0, val * modifiers[i]))
+  );
+}
+
+/**
+ * Compute a summary of RL learning state for display/debug purposes.
+ */
+export function getRLSummary(historyRecords) {
+  if (!historyRecords || historyRecords.length === 0) {
+    return { totalRecords: 0, completionRate: 0, onTimeRate: 0, avgVibeChange: 0, bestSlots: [], worstSlots: [] };
+  }
+  const total = historyRecords.length;
+  const completed = historyRecords.filter(r => !r.was_abandoned).length;
+  const onTime = historyRecords.filter(r => r.completed_on_time && !r.was_abandoned).length;
+  const vibeChanges = historyRecords.filter(r => r.vibe_before != null && r.vibe_after != null)
+    .map(r => r.vibe_after - r.vibe_before);
+  const avgVibeChange = vibeChanges.length > 0 ? vibeChanges.reduce((a, b) => a + b, 0) / vibeChanges.length : 0;
+
+  const modifiers = computeRLModifiers(historyRecords);
+  const indexed = modifiers.map((m, i) => ({ slot: i, mod: m }));
+  const bestSlots = [...indexed].sort((a, b) => b.mod - a.mod).slice(0, 3).map(s => slotToTime(s.slot));
+  const worstSlots = [...indexed].sort((a, b) => a.mod - b.mod).slice(0, 3).map(s => slotToTime(s.slot));
+
+  return {
+    totalRecords: total,
+    completionRate: completed / total,
+    onTimeRate: total > 0 ? onTime / total : 0,
+    avgVibeChange,
+    bestSlots,
+    worstSlots,
+  };
+}
+
+/**
+ * Local RL scheduler — places tasks based on energy profile.
+ * Analytical → highest energy slots, Routine → low energy slots.
+ */
+export function localRLScheduler(tasks, fixedBlocks, energyProfile, startHour = 5) {
+  if (!tasks || tasks.length === 0) return [];
+  const endSlot = 46;
+  const occupied = new Set();
+  (fixedBlocks || []).forEach(fb => { for (let s = fb.startSlot; s < fb.endSlot; s++) occupied.add(s); });
+
+  const scoreSlot = (slot, n, type) => {
+    let e = 0;
+    for (let s = slot; s < slot + n; s++) { if (s >= endSlot || occupied.has(s)) return -Infinity; e += energyProfile[s] || 0; }
+    const avg = e / n;
+    if (type === "analytical") return avg * 2.0;
+    if (type === "creative") return avg * 1.2;
+    return 1.0 - avg * 0.5;
+  };
+
+  const prio = { analytical: 0, creative: 1, routine: 2 };
+  const sorted = [...tasks].sort((a, b) => (prio[a.task_type] ?? 1) - (prio[b.task_type] ?? 1) || (b.priority || 3) - (a.priority || 3));
+  const result = [];
+  const start = Math.max(0, Math.ceil(startHour * 2));
+
+  for (const task of sorted) {
+    const n = Math.max(1, Math.round((task.duration || 0.5) * 2));
+    let bestS = -1, bestSc = -Infinity;
+    for (let s = start; s + n <= endSlot; s++) { const sc = scoreSlot(s, n, task.task_type); if (sc > bestSc) { bestSc = sc; bestS = s; } }
+    if (bestS >= 0) {
+      for (let s = bestS; s < bestS + n; s++) occupied.add(s);
+      result.push({ ...task, scheduled_start: bestS, scheduled_slots: n, assigned_block: "RL" });
+    }
+  }
+  return result.sort((a, b) => a.scheduled_start - b.scheduled_start);
+}
